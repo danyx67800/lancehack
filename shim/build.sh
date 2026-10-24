@@ -78,7 +78,14 @@ PY
 fi
 
 if [ "$BOARD" = lancelot ]; then
-	$MKBOOTIMG --header_version 2 --kernel out/Image --ramdisk out/ramdisk.bin \
+	# The stock boot.img carries a gzip kernel and MTK LK is only exercised
+	# with that format, so ship the shim the same way (NOGZIP=1 to compare).
+	KERNEL=out/Image
+	if [ -z "${NOGZIP:-}" ]; then
+		gzip -9 -n -c out/Image > out/Image.gz
+		KERNEL=out/Image.gz
+	fi
+	$MKBOOTIMG --header_version 2 --kernel "$KERNEL" --ramdisk out/ramdisk.bin \
 		--dtb "$DTB" --base 0x40078000 --kernel_offset 0x8000 \
 		--ramdisk_offset 0x7c08000 --tags_offset 0xbc08000 --dtb_offset 0xbc08000 \
 		--pagesize 2048 --os_version 11.0.0 --os_patch_level 2026-10 \
