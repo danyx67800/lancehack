@@ -109,19 +109,43 @@ Read with `fastboot` on the actual phone. No partition was written.
 | `battery-voltage` | 3736 mV, `battery-soc-ok: yes` | phone in a healthy state |
 | RAM | 4 GB (user) | second bank still to be measured |
 
-Partition sizes seen before the read was truncated by the host pipeline (see below):
-`boot` 64 MiB, `cache` 432 MiB, `cust` 1 GiB, `devinfo` 8 MiB, `dtbo` 16 MiB,
-`exaid` 384 MiB, `ffu` 11.5 MiB, `flashinfo` 16 MiB, `gsort` 16 MiB, `gz1`/`gz2`
-16 MiB each, `lk`/`lk2` 2 MiB each, `logo` 8 MiB, `md1img` 128 MiB, `minidump`
-128 MiB, `nvram` 64 MiB, `otp` 43 MiB, `scp1`/`scp2` 6 MiB, `sgpt` 32 KiB,
-`spmfw` 1 MiB, `sspm_1`/`sspm_2` 1 MiB, `super` 7 GiB, `tee1`/`tee2` 5 MiB,
-`userdata` ~48.4 GiB.
+The phone runs a **custom ROM (AfterlifeOS), not MIUI** (user, 2026-10-24). The
+restore material therefore comes from the AfterlifeOS build for lancelot, not from a
+Xiaomi fastboot ROM; the partition layout below is the one the current firmware
+exposes.
 
-**The list above is PARTIAL, not a full GPT**: the `getvar all` stream was cut by the
-host's `head`, and a second enumeration (`fastboot oem device-info`) printed further
-names (`proinfo`, `sec1`) that never appeared in the first one. In particular the
-existence of a `recovery` partition is **UNRESOLVED** — it decides the M2 boot path
-(see `docs/RECOVERY.md`). Re-read the full table before planning any write.
+Full table from a clean `getvar all` (52 entries; sizes in the bootloader's hex, with
+MiB for reading):
+
+| Partition | Size | Partition | Size |
+| --- | --- | --- | --- |
+| `boot` | `0x4000000` = 64 MiB | `boot_para` | `0x1a00000` = 26 MiB |
+| `cache` | `0x1b000000` = 432 MiB | `cust` | `0x40000000` = 1 GiB |
+| `devinfo` | 8 MiB | `dtbo` | `0x1000000` = 16 MiB |
+| `efuse` | `0x80000` = 512 KiB | `exaid` | 384 MiB |
+| `expdb` | `0x1400000` = 20 MiB | `ffu` | `0xb80000` = 11.5 MiB |
+| `flashinfo` | 16 MiB | `frp` | `0x100000` = 64 KiB |
+| `gsort` | 16 MiB | `gz1`, `gz2` | 16 MiB each |
+| `lk`, `lk2` | `0x200000` = 2 MiB each | `logo` | 8 MiB |
+| `md1img` | `0x8000000` = 128 MiB | `md_udc` | `0x169a000` = 22.6 MiB |
+| `metadata` | `0x2000000` = 32 MiB | `minidump` | 128 MiB |
+| `misc` | `0x80000` = 512 KiB | `nvcfg` | `0x2000000` = 32 MiB |
+| `nvdata` | `0x4000000` = 64 MiB | `nvram` | `0x4000000` = 64 MiB |
+| `otp` | `0x2b00000` = 43 MiB | `para` | 512 KiB |
+| `persist` | `0x3000000` = 48 MiB | `persistbak` | 48 MiB |
+| `pgpt` | 32 KiB | `preloader` | `0x80000` = 512 KiB |
+| `proinfo` | `0x300000` = 3 MiB | `protect1` | 8 MiB |
+| `protect2` | `0xb5e000` = 11.4 MiB | **`recovery`** | **`0x4000000` = 64 MiB** |
+| `scp1`, `scp2` | 6 MiB each | `sec1` | `0x200000` = 2 MiB |
+| `seccfg` | 8 MiB | `sgpt` | 32 KiB |
+| `spmfw` | 1 MiB | `sspm_1`, `sspm_2` | 1 MiB each |
+| `super` | `0x1c0000000` = 7 GiB | `tee1`, `tee2` | `0x500000` = 5 MiB each |
+| `userdata` | `0xc1f4f8000` ≈ 48.35 GiB | `vbmeta`, `vbmeta_system`, `vbmeta_vendor` | `0x800000` = 8 MiB each |
+
+**`recovery` exists**, so the approved M2 path (flash the shim into `recovery`, leave
+Android's `boot` untouched) is viable on this phone. `boot` and `recovery` are the
+same size (64 MiB), which also makes a shim image interchangeable between them if
+needed.
 
 Operational findings, both reproduced on this unit:
 
