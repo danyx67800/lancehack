@@ -49,16 +49,15 @@ Porting note: sweet/beryllium use Qualcomm PPI numbering (virt 19, phys 18). MTK
 the ARM-standard 11/14 here, so the XNU timer PPI patch must be board-parameterised,
 not just re-addressed.
 
-## 3. Memory map
-
-Measured from the LK FDT of a **3 GiB** unit (hataketsu/mt6768-mainline-notes, see
-sources at the bottom). The 4/6 GiB SKUs are NOT described by these notes and must be
-re-read on the actual phone.
+## 3. Memory mapMeasured from the LK FDT of a **3 GiB** unit (hataketsu/mt6768-mainline-notes, see
+sources at the bottom). **This phone is the 4 GiB SKU** (user, 2026-10-24), so expect an
+additional bank above 4 GiB; the exact split is measured from the live FDT in M1.
 
 | Fact | Value | Status |
 | --- | --- | --- |
+| Installed RAM | **4 GB** | CONFIRMED by the user (not yet read on the phone) |
 | DRAM bank 0 (3 GiB unit) | `0x40000000` + `0xc0000000` (ends exactly at 4 GiB) | CONFIRMED on that unit |
-| DRAM above 4 GiB | none reported on the 3 GiB unit | CONFIRMED on that unit; 4/6 GiB UNKNOWN |
+| DRAM above 4 GiB | none on the 3 GiB unit; a 4 GiB unit is expected to report a second bank (typically `0x1_00000000` or `0x1_40000000`) | HYPOTHESIS for this SKU — measure in M1 |
 | `BOARD_KERNEL_BASE` (Android image layout) | `0x40078000`, kernel load `0x40080000` | CONFIRMED (LineageOS BoardConfig) |
 | LK FDT physical address | `0x4bc80000` (= `BOARD_KERNEL_BASE + BOARD_DTB_OFFSET`, also the boot tags address) | CONFIRMED (port notes) |
 | Mainline DTS `memory@40000000` | `reg = <0x0 0x40000000 0x0 0x3e605000>` (~997 MiB) | CONFIRMED as DTS content; **do not** read it as the installed RAM size |
@@ -94,6 +93,44 @@ sane kernel region is **`0x80000000`–`0xae000000`** (768 MiB) minus `0x9f90000
 or **`0x50000000`–`0x70000000`** (512 MiB, below TEE). This is *very* different from
 sweet's 3.95 GiB: a 3 GiB phone will be RAM-starved and the plan commits to `cpus=1`
 plus a small physmap first. Exact placement is decided from the live FDT in M2, not here.
+
+## 3b. On-device read, 2026-10-24 (M1, partial)
+
+Read with `fastboot` on the actual phone. No partition was written.
+
+| Variable | Value | Note |
+| --- | --- | --- |
+| `product` | `lancelot` | CONFIRMED on device |
+| `unlocked` | `yes` | bootloader already unlocked |
+| `secure` | `no` | no secure boot enforcement |
+| `hw-revision` | `ca00` | — |
+| `max-download-size` | `0x8000000` (128 MiB) | sparse chunks must stay below this |
+| `logical-block-size` / `erase-block-size` | 512 B / 512 KiB | — |
+| `battery-voltage` | 3736 mV, `battery-soc-ok: yes` | phone in a healthy state |
+| RAM | 4 GB (user) | second bank still to be measured |
+
+Partition sizes seen before the read was truncated by the host pipeline (see below):
+`boot` 64 MiB, `cache` 432 MiB, `cust` 1 GiB, `devinfo` 8 MiB, `dtbo` 16 MiB,
+`exaid` 384 MiB, `ffu` 11.5 MiB, `flashinfo` 16 MiB, `gsort` 16 MiB, `gz1`/`gz2`
+16 MiB each, `lk`/`lk2` 2 MiB each, `logo` 8 MiB, `md1img` 128 MiB, `minidump`
+128 MiB, `nvram` 64 MiB, `otp` 43 MiB, `scp1`/`scp2` 6 MiB, `sgpt` 32 KiB,
+`spmfw` 1 MiB, `sspm_1`/`sspm_2` 1 MiB, `super` 7 GiB, `tee1`/`tee2` 5 MiB,
+`userdata` ~48.4 GiB.
+
+**The list above is PARTIAL, not a full GPT**: the `getvar all` stream was cut by the
+host's `head`, and a second enumeration (`fastboot oem device-info`) printed further
+names (`proinfo`, `sec1`) that never appeared in the first one. In particular the
+existence of a `recovery` partition is **UNRESOLVED** — it decides the M2 boot path
+(see `docs/RECOVERY.md`). Re-read the full table before planning any write.
+
+Operational findings, both reproduced on this unit:
+
+- **`fastboot fetch <partition>` is not supported**: the host waits forever and no
+  data arrives. There is no fastboot-side partition backup.
+- **`fastboot boot` wedges LK**: the host wraps the file, starts `Sending 'boot.img'`
+  and never completes; afterwards the bootloader enumerates on USB but stops
+  answering `getvar` until it is power-cycled. Consistent with the two reports that
+  the command is not implemented.
 
 ## 4. Boot chain
 

@@ -38,16 +38,25 @@ M2004J19G / M2004J19AG. Match the phone's own version string, not the model code
 
 ## 2. Partition backup (M1)
 
-There is **no `fastboot boot`** on this phone, so a backup cannot be taken by
-temporarily booting TWRP. The realistic paths, in order of preference:
+There is **no `fastboot boot`** on this phone (verified on the unit: the transfer stalls
+and LK stops answering until power-cycled), and **`fastboot fetch` is not supported**
+(the host waits forever, no data). So a backup cannot be taken from fastboot. The
+realistic paths, in order of preference:
 
 1. **BROM read-only with mtkclient** (no partition writes, no flashing):
    `mtkclient` can read `by-name` partitions through the Boot ROM. Access may be
    refused on units with SBC/SLA/DAA enabled; a refusal is a normal outcome, not a
    failure of the phone.
-2. **TWRP flashed into `recovery`, then `adb pull`**: this is itself a write to
-   `recovery`, so it must be preceded by a backup of the stock `recovery` — which is
-   available from the stock ROM `.tgz`, so nothing is lost if TWRP is written there.
+2. **A recovery flashed into the slot LK actually boots, then `adb pull`**: this is
+   itself a write, so it must be preceded by having the matching stock image from the
+   ROM `.tgz` (which is device-independent for a given firmware build, so it is
+   available without reading the phone).
+
+   Which slot that is, is **not yet settled** on this phone: the first `fastboot getvar
+   all` did not list a `recovery` partition, but that read was truncated, and on MTK
+   phones with dynamic partitions the recovery ramdisk often lives inside `boot`
+   (recovery-as-boot). The full table decides it, and with it whether the M2 plan
+   ("flash the shim into `recovery`") is even possible.
 
 Partitions to back up (all sizes are read from the phone, not assumed):
 
