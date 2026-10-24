@@ -79,6 +79,29 @@ shim/out/shim-boot-lancelot.img`, then Vol+ + Power to boot it. Restore is
 If the image is black and the phone ignores the buttons, hold Power ~15 s: the shim
 stops the hardware watchdog, so a hang before the first screen does not self-recover.
 
+**TEST #2 (2026-10-24, first M2 image `716ef264`): black screen for a few seconds,
+then the phone rebooted into Android.** The shim clearly got control (nothing else
+would reboot at that point), but two things were wrong:
+
+1. **`CNTFRQ_EL0` is 0 on this SoC.** Linux reads the timer frequency from the DT
+   (`clock-frequency = 0xc65d40`), not from the register, and the shim's `sleep_ms()`
+   multiplied by `cntfrq_el0 / 1000` - zero, so every delay, including the final
+   90 s hold, returned immediately. That alone explains "a few seconds then reboot".
+   Fix: `timer_hz()` falls back to 13 MHz and the raw register value is printed.
+   This also matters for XNU: the ADT must carry the frequency, not rely on CNTFRQ.
+2. **The framebuffer base was taken from the DTBO placeholder** (`0x7e605000`) before
+   reading LK's live `/chosen`. The probe now parses the FDT first, adopts LK's value
+   only inside the `0x7dcb0000` carve-out (`live=` flag in the report), and only then
+   touches the panel.
+
+No evidence yet that the panel is being refreshed at all: the DTBO's baked value is
+`islcm_inited = 0`, and a command-mode panel only shows a new frame when the SoC
+sends one. If the next boot is still black, the 120 s reset (new image `42153172`) is
+the breadcrumb that tells execution apart from a display problem.
+
+**TEST #3 pending:** `42153172` flashed into `recovery`; boot it and time the reboot
+(~2 min = ran to the end, ~3 s = crashes early).
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

@@ -41,10 +41,22 @@ static uint32_t be32(uintptr_t a) { return __builtin_bswap32(rd32(a)); }
 
 extern volatile uint32_t *con_fb;
 
-static void sleep_ms(unsigned ms)
+/*
+ * MTK firmware leaves CNTFRQ_EL0 at 0 on this SoC - Linux reads the frequency
+ * from the DT (timer/clock-frequency = 13 MHz) - and a zero frequency would
+ * turn every delay into zero. Keep the raw value for the report.
+ */
+static uint64_t cntfrq_raw;
+
+static uint64_t timer_hz(void)
 {
-	uint64_t f = rsr("cntfrq_el0");
-	uint64_t end = rsr("cntpct_el0") + f / 1000 * ms;
+	return cntfrq_raw ? cntfrq_raw : 13000000UL;
+}
+
+static void sleep_ms(uint64_t ms)
+{
+	uint64_t f = timer_hz();
+	uint64_t end = rsr("cntpct_el0") + f * ms / 1000;
 
 	while (rsr("cntpct_el0") < end)
 		;
@@ -126,39 +138,40 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 void shim_main(uint64_t dtb)
 {
 	struct lance_probe p;
+	uint64_t fbb;
+	int fb_live;
 
-	/* The framebuffer base is known from the DTBO; prove execution now. */
-	con_clear(0xff101010U);
-	con_str("SHIM", "lancelot M2 probe");
-	con_str("STAGE", "1 running");
-	bar(RED, 1);
-
+	/* The watchdog first: it is plain MMIO and must not be able to reset the
+	 * phone in the middle of the probe. */
 	wdt_stop();
-	con_str("STAGE", "2 watchdog stopped");
-	bar(YELLOW, 2);
+	cntfrq_raw = rsr("cntfrq_el0");
 
-	/* LK passes the merged FDT in x0; fall back to the tags address. */
+	/* LK passes the merged FDT in x0; fall back to the tags address. Read it
+	 * before touching the framebuffer: the base in the DTBO is a placeholder,
+	 * only LK's live value is authoritative. */
 	if (!dtb || be32(dtb) != FDT_MAGIC)
 		dtb = LK_FDT_ADDR;
 	lance_fdt_probe(dtb, &p);
 
-	/* If LK reports a different framebuffer, believe it - but only inside the
-	 * framebuffer carve-out (0x7dcb0000 + 34 MiB), never over modem/SCP RAM. */
-	uint64_t fbb = p.fb_base_l | (p.fb_base_h << 32);
-	if (p.valid && fbb >= 0x7dc00000UL && fbb < 0x7ff00000UL && !(fbb & 3) &&
-	    fbb != (uint64_t)(uintptr_t)con_fb) {
-		con_fb = (volatile uint32_t *)(uintptr_t)fbb;
-		con_clear(0xff101010U);
-	} else if (!p.valid) {
-		/* Not even an FDT header: say so on the screen we already own. */
-		con_str("WARN", "no FDT at x0 or tags addr");
-	}
+	fbb = p.fb_base_l | (p.fb_base_h << 32);
+	/* Accept it only inside the framebuffer carve-out (0x7dcb0000 + 34 MiB):
+	 * a parsing mistake must never scribble over modem or SCP RAM. */
+	fb_live = p.valid && fbb >= 0x7dc00000UL && fbb < 0x7ff00000UL && !(fbb & 3);
+	con_fb = (volatile uint32_t *)(uintptr_t)(fb_live ? fbb : FB_BASE);
+
+	con_clear(0xff101010U);
+	con_str("SHIM", "lancelot M2 probe");
+	con_str("STAGE", "1 running");
+	bar(RED, 1);
+	con_str("STAGE", "2 watchdog stopped");
+	bar(YELLOW, 2);
 	bar(GREEN, 3);
 
 	con_str("SHIM", "lancelot M2 probe");
 	con_hex("EL", rsr("CurrentEL") >> 2);
 	con_hex("MPIDR", rsr("mpidr_el1"));
-	con_hex("CNTFRQ", rsr("cntfrq_el0"));
+	con_hex("CNTFRQ", cntfrq_raw);
+	con_hex("TIMER_HZ", timer_hz());
 	con_hex("MMFR0", rsr("id_aa64mmfr0_el1"));
 	con_hex("SCTLR", rsr("sctlr_el1"));
 	con_skip();
@@ -167,7 +180,7 @@ void shim_main(uint64_t dtb)
 	con_hex("WD_MODE", wdt_mode);
 	con_skip();
 
-	con_hex("FB_ARG", fbb);
+	con_hex2("FB_ARG", "live=", (uint32_t)fb_live, "lo=", (uint32_t)fbb);
 	con_hex2("FB", "w=", FB_W, "h=", FB_H);
 	con_hex("VRAM", p.vram);
 	con_hex2("LCM", "found=", (uint32_t)p.lcmfound,
@@ -202,9 +215,12 @@ void shim_main(uint64_t dtb)
 			break;	/* Last */
 	}
 
-	con_str("STAGE", "4 probe done, reset in 90s");
+	con_str("STAGE", "4 probe done, reset in 120s");
 	bar(BLUE, 4);
-	sleep_ms(90000);
+	/* The wait is the breadcrumb when the panel shows nothing: if the phone
+	 * reboots after ~2 minutes our code ran to the end, if it reboots after a
+	 * few seconds it did not. */
+	sleep_ms(120000);
 	con_str("RESET", "now");
 	sleep_ms(2000);
 	reset_now();
