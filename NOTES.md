@@ -54,12 +54,30 @@ no device-specific partition is ever written (`docs/RECOVERY.md` §2).
 unknown), pixel format/stride of the LK framebuffer, whether the command-mode panel
 keeps being scanned out after LK or needs a refresh kick.
 
-**Next (M2):** `BOARD_LANCELOT` in `shim/board.h` + a `lancelot` case in
-`shim/build.sh` (boot.img v2, pages 2048, DTB in header, `--base 0x40078000`,
-`--tags_offset 0xbc08000`); install `mkbootimg` and `aarch64-elf-gcc`; the shim stops
-TOPRGU, dumps the live FDT (memory map, commit hash of what LK passed) to the
-framebuffer as staged colour bars plus text, then flashes to `recovery` with sha256
-and an explicit confirmation. Restore = `backup/lancelot-lineage/recovery.img`.
+**M2 built (2026-10-24, commit `de1a7e0`), waiting for the flash.** `BOARD=lancelot` is
+in `shim/board.h` and `shim/build.sh` (boot.img v2, 2048-byte pages, DTB at
+`0x4bc80000`, vendored AOSP `tools/mkbootimg.py`). The shim (`shim/lancelot.c`) clears
+the screen with a red stage bar, stops TOPRGU, reads the live FDT through
+`shim/fdt_lance.c`, adopts LK's framebuffer only inside the `0x7dcb0000` carve-out,
+prints EL/MPIDR/CNTFRQ/MMFR0/FDT size/WD_MODE/fb/vram/lcm name, the `/memory` banks and
+the GICD/GICR identification, then resets after 90 s via PSCI SYSTEM_RESET with a
+TOPRGU software reset as fallback. It is 151 552 bytes, well inside the 64 MiB slot.
+
+- `tools/mkbootimg.py` = AOSP `mkbootimg.py` (android12-release, Apache-2.0, header
+  kept), because no Homebrew formula exists for it.
+- The FDT reader has a host test: `gcc -O1 -o shim/out/host_fdt shim/host_fdt.c
+  shim/fdt_lance.c && ./shim/out/host_fdt DTB`. On the real merged DTB (fdtoverlay of
+  the base DTB + the lancelot dtbo) it reports `0x40000000`+`0x3e605000`, fb
+  `0x7e605000`, vram `0x17e8000`, lcm `hx83112b_fhdp_dsi_cmd_auo_rt5081_drv`.
+- Artifact: `shim/out/shim-boot-lancelot.img`, 276 480 bytes, SHA-256
+  `716ef264054eab318c8419f9b71902d6f693972ee61248fe3c32665c931b6a3e`.
+
+**Next:** the flash itself (user confirmation required): `fastboot flash recovery
+shim/out/shim-boot-lancelot.img`, then Vol+ + Power to boot it. Restore is
+`fastboot flash recovery backup/lancelot-lineage/recovery.img`.
+
+If the image is black and the phone ignores the buttons, hold Power ~15 s: the shim
+stops the hardware watchdog, so a hang before the first screen does not self-recover.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
