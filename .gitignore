@@ -8,3 +8,11 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+# Apple artifacts and built images stay local: IPSW, extracted volume images, ADTs,
+# root images (they contain Apple code and, for ADTs, iPhone X device-tree data)
+*.ipsw
+*.dmg
+*.adt
+ios16-root*.img
+ios16-root*.simg
+root*.img

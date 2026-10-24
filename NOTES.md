@@ -1,4 +1,55 @@
-# iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
+# lancehack - iOS on the Redmi 9 (lancelot, MT6768) - working notes
+
+Fork of [ios-sweet](https://github.com/dipa-studio/ios-sweet) (iOS 16 on the Redmi Note 10
+Pro) targeting the Xiaomi Redmi 9 `lancelot` (MT6769V/CU, Helio G80), following the
+porting pattern of [Bergamota / ios-beryllium](https://github.com/ry-diffusion/bergamota)
+(Poco F1, SDM845). The text below the next section is upstream sweet's log and is kept
+as-is: it documents the machinery this fork inherits.
+
+## lancehack handoff (2026-10-24, M0 complete - desk research only)
+
+**STATE: nothing has run on the phone yet.** No partition has been read or written.
+Repo: `danyx67800/lancehack` (public fork of ios-sweet at `45263be`, 85 patches through
+`0081-sweet-usb-link-state`). Remotes: `upstream` = dipa-studio/ios-sweet,
+`bergamota` = ry-diffusion/bergamota (merge base `11da58b`). Our own patch series
+starts at `0082`.
+
+**Done in M0:** fork + remotes; delta analysis (`docs/PORTING.md`); hardware matrix
+with source and status per fact (`docs/lancelot-hardware.md`); restore plan skeleton
+(`docs/RECOVERY.md`); host check (macOS arm64, M4, 36 GiB free, docker, qemu, dtc,
+gh; fastboot/adb installed via `--cask android-platform-tools`; no `mkbootimg`,
+no `aarch64-*-gcc`, no apfs-fuse - not needed yet).
+
+**Findings that change the plan vs sweet/beryllium:**
+- **`fastboot boot` does not exist on lancelot.** Two independent reports:
+  XDA (`Booting FAILED (remote: 'Unrecognized command boot')`) and
+  `hataketsu/mt6768-mainline-notes` ("fastboot boot is broken on this device").
+  The RAM-only bring-up used by both existing ports is therefore unavailable; at
+  least one partition write is required. Recommended: flash the shim into
+  `recovery` (Android keeps booting; restore = `fastboot flash recovery stock.img`).
+  This is a decision for the user, not for an agent: see `docs/RECOVERY.md`.
+- **Memory is the second wall.** A 3 GiB unit reports `0x40000000`+`0xc0000000` and
+  nothing above 4 GiB, with 18 fixed carve-outs (`docs/lancelot-hardware.md` §3).
+  There is no sweet-style 3.95 GiB window: the largest sane region is ~768 MiB
+  (`0x80000000`-`0xae000000`, minus the SCP/ccci blocks). Plan for `cpus=1` first.
+- **Storage is eMMC (MSDC0), not UFS.** The whole UFS driver is replaced by new code
+  (M4). This is the largest single block of work.
+- **Timer PPIs are the ARM-standard 13/14/11/10**, not Qualcomm's 19/18; `CNTFRQ` is
+  not in any source - measure it in the shim. GICv3 at `0x0c000000`/`0x0c040000`.
+- **The panel is command-mode DSI** (Himax HX83112B / AUO, 1080x2340) and the LK
+  framebuffer is `0x7e605000` inside the `0x7dcb0000`+34 MiB carve-out. Whether the
+  panel keeps being scanned out after LK, or needs a refresh kick, is UNKNOWN and is
+  the main question of M2.
+- **TOPRGU** (`0x10007000`) must be stopped in the first instructions of the shim,
+  or boots will reset unpredictably.
+- Touch is on **SPI0** (Novatek vs Focaltech unresolved), IRQ GPIO 1, reset GPIO 92,
+  `vldo28`. Keys: MTK KP `0x10010000` + MT6358 via PWRAP `0x1000d000`.
+
+**Next (M1, with the user):** confirm the RAM/ROM variant and the bootloader state;
+`fastboot getvar all` + `oem device-info`; read the live FDT; dump `boot`, `recovery`,
+`dtbo`, `vbmeta*`; fill the UNKNOWN rows of `docs/lancelot-hardware.md` and the
+TODO(M1) rows of `docs/RECOVERY.md`. Nothing is written until those backups exist and
+the boot path is chosen.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
