@@ -11,12 +11,16 @@
 #define MARGIN		24
 #define LABEL_COLS	8
 
-volatile uint32_t *con_fb = (volatile uint32_t *)FB_BASE;
+/* Set at runtime: a statically initialised absolute pointer would leave an
+ * ABS64 relocation in .data, and the image is loaded at an arbitrary address. */
+volatile uint32_t *con_fb;
 static uint32_t con_bg;
 static int row;
 
 void con_clear(uint32_t bg)
 {
+	if (!con_fb)
+		con_fb = (volatile uint32_t *)(uintptr_t)FB_BASE;
 	for (int y = 0; y < FB_H; y++) {
 		volatile uint32_t *line = con_fb + y * (FB_STRIDE / 4);
 		for (int x = 0; x < FB_W; x++)
