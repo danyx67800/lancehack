@@ -6,50 +6,60 @@ porting pattern of [Bergamota / ios-beryllium](https://github.com/ry-diffusion/b
 (Poco F1, SDM845). The text below the next section is upstream sweet's log and is kept
 as-is: it documents the machinery this fork inherits.
 
-## lancehack handoff (2026-10-24, M0 complete - desk research only)
+## lancehack handoff (2026-10-24, M1 done - phone read, still nothing written)
 
-**STATE: nothing has run on the phone yet.** No partition has been read or written.
-Repo: `danyx67800/lancehack` (public fork of ios-sweet at `45263be`, 85 patches through
-`0081-sweet-usb-link-state`). Remotes: `upstream` = dipa-studio/ios-sweet,
-`bergamota` = ry-diffusion/bergamota (merge base `11da58b`). Our own patch series
-starts at `0082`.
+**STATE: the phone has been read, no partition has been written.** Boot path decided
+with the user: the shim goes into **`recovery`** (64 MiB); Android's `boot` is never
+touched. Restore image in hand (see below).
 
-**Done in M0:** fork + remotes; delta analysis (`docs/PORTING.md`); hardware matrix
-with source and status per fact (`docs/lancelot-hardware.md`); restore plan skeleton
-(`docs/RECOVERY.md`); host check (macOS arm64, M4, 36 GiB free, docker, qemu, dtc,
-gh; fastboot/adb installed via `--cask android-platform-tools`; no `mkbootimg`,
-no `aarch64-*-gcc`, no apfs-fuse - not needed yet).
+Repo: `danyx67800/lancehack`, public fork of ios-sweet at `45263be` (85 patches through
+`0081-sweet-usb-link-state`). Remotes `upstream` (dipa-studio/ios-sweet) and
+`bergamota` (ry-diffusion/bergamota, merge base `11da58b`). Our series starts at `0082`.
 
-**Findings that change the plan vs sweet/beryllium:**
-- **`fastboot boot` does not exist on lancelot.** Two independent reports:
-  XDA (`Booting FAILED (remote: 'Unrecognized command boot')`) and
-  `hataketsu/mt6768-mainline-notes` ("fastboot boot is broken on this device").
-  The RAM-only bring-up used by both existing ports is therefore unavailable; at
-  least one partition write is required. Recommended: flash the shim into
-  `recovery` (Android keeps booting; restore = `fastboot flash recovery stock.img`).
-  This is a decision for the user, not for an agent: see `docs/RECOVERY.md`.
-- **Memory is the second wall.** A 3 GiB unit reports `0x40000000`+`0xc0000000` and
-  nothing above 4 GiB, with 18 fixed carve-outs (`docs/lancelot-hardware.md` §3).
-  There is no sweet-style 3.95 GiB window: the largest sane region is ~768 MiB
-  (`0x80000000`-`0xae000000`, minus the SCP/ccci blocks). Plan for `cpus=1` first.
-- **Storage is eMMC (MSDC0), not UFS.** The whole UFS driver is replaced by new code
-  (M4). This is the largest single block of work.
-- **Timer PPIs are the ARM-standard 13/14/11/10**, not Qualcomm's 19/18; `CNTFRQ` is
-  not in any source - measure it in the shim. GICv3 at `0x0c000000`/`0x0c040000`.
-- **The panel is command-mode DSI** (Himax HX83112B / AUO, 1080x2340) and the LK
-  framebuffer is `0x7e605000` inside the `0x7dcb0000`+34 MiB carve-out. Whether the
-  panel keeps being scanned out after LK, or needs a refresh kick, is UNKNOWN and is
-  the main question of M2.
-- **TOPRGU** (`0x10007000`) must be stopped in the first instructions of the shim,
-  or boots will reset unpredictably.
-- Touch is on **SPI0** (Novatek vs Focaltech unresolved), IRQ GPIO 1, reset GPIO 92,
-  `vldo28`. Keys: MTK KP `0x10010000` + MT6358 via PWRAP `0x1000d000`.
+**The phone:** lancelot, **4 GB**, **AfterlifeOS Android 16** (`BP2A.250605.031.A2`,
+`ro.build.type=user`), bootloader **unlocked**, `secure: no`, base firmware
+`V12.5.6.0.RJCMIXM`. 52 partitions, including `recovery` 64 MiB, `boot` 64 MiB,
+`dtbo` 16 MiB, `super` 7 GiB, `userdata` 48.35 GiB. Full table in
+`docs/lancelot-hardware.md` §4.
 
-**Next (M1, with the user):** confirm the RAM/ROM variant and the bootloader state;
-`fastboot getvar all` + `oem device-info`; read the live FDT; dump `boot`, `recovery`,
-`dtbo`, `vbmeta*`; fill the UNKNOWN rows of `docs/lancelot-hardware.md` and the
-TODO(M1) rows of `docs/RECOVERY.md`. Nothing is written until those backups exist and
-the boot path is chosen.
+**Read in M1:** `fastboot getvar all` (twice: the first attempt was truncated by a
+host-side `head`); LineageOS 24.0 (20261024) lancelot `boot.img`, `dtbo.img`,
+`recovery.img`, `vbmeta.img` downloaded and SHA-256'd into `backup/lancelot-lineage/`
+(git-ignored); `boot.img` unpacked with `tools/unpack_bootv2.py` -> 118 867-byte DTB ->
+`dtc`; `dtbo.img` entry 0 extracted and decompiled. Those artifacts turned most
+hypotheses into confirmed facts:
+
+- GICv3 `0x0c000000` (dist `0x40000`) + `0x0c040000` (redist `0x200000`), MTK sysirq at
+  `0x0c53a650`; timer PPIs **13/14/11/10**; **`CNTFRQ = 13 MHz`** (`0xc65d40`); PSCI
+  `arm,psci-1.0`, `smc`.
+- eMMC **MSDC0** `0x11230000` + `0x10000`, IRQ **SPI 100**, top block `0x11cd0000`,
+  8-bit, HS400 at 200 MHz, **CQHCI present**.
+- Panel `hx83112b_fhdp_dsi_cmd_auo_rt5081_drv` (1080x2340, **command mode**), boot FB
+  **`0x7e605000`**, vram `0x017e8000`; DSI0 `0x14014000` (SPI 238), OVL0_2L
+  `0x1400c000` (SPI 242), mutex `0x14016000`.
+- Touch = **Novatek NT36672 over SPI0** `0x1100a000` (SPI 138), reset GPIO 92, IRQ
+  GPIO 1, 8 MHz; keypad `0x10010000` (SPI 73); PMIC **MT6358** via PWRAP `0x1000d000`.
+- TOPRGU `0x10007000` size `0x1000`, IRQ SPI 156, `rg_dfd_timeout = 0xa0`.
+- boot.img: header v2, pages 2048, kernel **gzip** 13.5 MB, ramdisk 1.5 MB,
+  `tags_addr = dtb_addr = 0x4bc80000`, cmdline `bootopt=64S3,32N2,64N2 ...`.
+
+**Operational findings (all reproduced):** `fastboot boot` stalls at `Sending` and
+wedges LK until a power cycle; `fastboot fetch` is not implemented; `adb root` is
+refused (user build) and SELinux denies `/proc/cmdline` and `/proc/device-tree` to
+`shell`. That is why the DTB was taken from the shipped boot image instead of the
+live FDT, and why there is no device-specific partition dump: none is needed, because
+no device-specific partition is ever written (`docs/RECOVERY.md` §2).
+
+**Open questions for M2:** the real DRAM map (live FDT; 4 GB SKU, second bank
+unknown), pixel format/stride of the LK framebuffer, whether the command-mode panel
+keeps being scanned out after LK or needs a refresh kick.
+
+**Next (M2):** `BOARD_LANCELOT` in `shim/board.h` + a `lancelot` case in
+`shim/build.sh` (boot.img v2, pages 2048, DTB in header, `--base 0x40078000`,
+`--tags_offset 0xbc08000`); install `mkbootimg` and `aarch64-elf-gcc`; the shim stops
+TOPRGU, dumps the live FDT (memory map, commit hash of what LK passed) to the
+framebuffer as staged colour bars plus text, then flashes to `recovery` with sha256
+and an explicit confirmation. Restore = `backup/lancelot-lineage/recovery.img`.
 
 ## Agent handoff / active work (2026-10-15, latest)
 

@@ -1,71 +1,64 @@
 # lancelot hardware facts
 
 Target: Xiaomi Redmi 9 (`lancelot`), MediaTek **MT6769V/CU** (Helio G80), part of the
-MT6768 family (mainline names the SoC `mt6768` and the Xiaomi board `mt6769t-xiaomi-*`).
+MT6768 family. The phone currently runs **AfterlifeOS (Android 16, user build)**.
 
-Every value below carries a **source** and a **status**:
+Every value carries a **source** and a **status**:
 
 | Status | Meaning |
 | --- | --- |
-| CONFIRMED | Stated explicitly by a primary source (mainline/LineageOS device tree, vendor kernel source, Linux driver whose binding matches the DT node). |
-| HYPOTHESIS | Consistent with the family or inferred from a sibling board; must be measured on the phone before use. |
-| UNKNOWN | No source found. Do not invent a value. |
+| CONFIRMED | Read from the device or from a primary artifact (the shipped DTB/DTBO, the boot image header, `fastboot getvar`, mainline/vendor DT source). |
+| HYPOTHESIS | Consistent with the family or a sibling board; must be measured before use. |
+| UNKNOWN | No source. Do not invent a value. |
 
-The rule of this project: **no address, register or constant goes into code without a
-row here.** When a shim measurement confirms or contradicts a row, update it and say
-which boot measured it.
+Rule: **no address, register or constant goes into code without a row here.** When a
+shim measurement confirms or contradicts a row, update it and name the boot that
+measured it.
 
-Last full review: 2026-10-24 (M0, desk research only; nothing measured on the phone yet).
+Last review: 2026-10-24 (M1: values below marked CONFIRMED come from the LineageOS
+24.0 lancelot `boot.img`/`dtbo.img` — which carry the same board DTB/overlay as the
+installed ROM — and from the phone itself).
 
 ## 1. SoC and CPU
 
 | Fact | Value | Source | Status |
 | --- | --- | --- | --- |
-| SoC | MT6769V/CU (Helio G80), 12 nm | GSMArena Redmi 9 page; mainline `mt6768.dtsi` + `mt6769t-xiaomi-common.dtsi` | CONFIRMED |
-| Cores | 2× Cortex-A75 + 6× Cortex-A55 | same DTS `cpus` node | CONFIRMED |
-| ISA level | ARMv8.2-A, **no pointer authentication**, no Apple PAC | A75/A55 core design; same class as sweet (A76/A55) and beryllium (A75/A55) | CONFIRMED (design) |
-| CPU `reg` (MPIDR affinity) | A55: `0x000, 0x100, 0x200, 0x300, 0x400, 0x500`; A75: `0x600, 0x700` | mainline `mt6768.dtsi`, `cpu@N` nodes | CONFIRMED (DT) |
-| Clusters | `cpu-map`: cluster0 = cpu0..cpu5 (A55), cluster1 = cpu6..cpu7 (A75) | same | CONFIRMED |
-| `enable-method` | `psci` on all eight | same | CONFIRMED |
-| Live MPIDR readout | — | — | UNKNOWN (shim prints it) |
-
-Porting note: unlike sweet (6 A55 of 8, A76 at 6-7) the big cores here are **6 and 7**,
-so the "big cores at the end" assumption holds, but the split is 6 little + 2 big.
+| SoC | MT6769V/CU (Helio G80), 12 nm | DTB root `compatible = "mediatek,MT6768"`; GSMArena | CONFIRMED |
+| Cores | 2× Cortex-A75 + 6× Cortex-A55 | DTB `cpus` | CONFIRMED |
+| ISA | ARMv8.2-A, **no pointer authentication** | A75/A55 cores; same class as sweet/beryllium | CONFIRMED (design) |
+| CPU `reg` | A55 `0x000,0x100,0x200,0x300,0x400,0x500`; A75 `0x600,0x700` | mainline `mt6768.dtsi`; DTB `cpus` nodes | CONFIRMED |
+| `enable-method` | `psci` (all eight) | DTB | CONFIRMED |
+| Live MPIDR | — | — | UNKNOWN (shim prints it in M2) |
 
 ## 2. Interrupts, timer, PSCI
 
 | Fact | Value | Source | Status |
 | --- | --- | --- | --- |
-| GIC | **GICv3**, `compatible = "arm,gic-v3"` | mainline `mt6768.dtsi`, `interrupt-controller@c000000` | CONFIRMED |
-| GIC distributor | `0x0c000000`, size `0x40000` | same | CONFIRMED |
-| GIC redistributor | `0x0c040000`, size `0x200000` (8 PEs) | same | CONFIRMED (size); stride HYPOTHESIS `0x40000` |
-| ITS | not declared in the SoC DTS | same | UNKNOWN |
-| Timer node | `arm,armv8-timer`, level-low | same | CONFIRMED |
-| Timer PPIs | secure phys **13**, non-secure phys **14**, virtual **11**, hyp **10** | same | CONFIRMED (DT) |
-| `CNTFRQ` | — | — | UNKNOWN. Family convention is 13 MHz (`system_clk` is 13 MHz in the DTS). **Measure `CNTFRQ_EL0` in the shim before using it.** |
-| PSCI | `arm,psci-1.0`, `method = "smc"` | same | CONFIRMED (DT) |
+| GIC | **GICv3**, `compatible = "arm,gic-v3"` | DTB `interrupt-controller` | CONFIRMED |
+| GIC distributor | `0x0c000000`, size `0x40000` | DTB `reg` | CONFIRMED |
+| GIC redistributor | `0x0c040000`, size `0x200000` (8 PEs, 1 region) | DTB `reg`, `#redistributor-regions = 1` | CONFIRMED |
+| MediaTek sysirq | `intpol-controller@0`, `mediatek,mt6577-sysirq`, registers at `0x0c53a650` (size `0x50`) | DTB | CONFIRMED |
+| Timer PPIs | secure phys **13**, non-secure phys **14**, virtual **11**, hyp **10**, all level-low | DTB `timer` interrupts | CONFIRMED |
+| **`CNTFRQ`** | **13 000 000 Hz** (`0xc65d40`) | DTB `timer/clock-frequency` | **CONFIRMED** |
+| PSCI | `arm,psci-1.0`, `method = "smc"` | DTB | CONFIRMED |
 
-Porting note: sweet/beryllium use Qualcomm PPI numbering (virt 19, phys 18). MTK uses
-the ARM-standard 11/14 here, so the XNU timer PPI patch must be board-parameterised,
-not just re-addressed.
+The sysirq block is a MediaTek quirk: Linux programs it to set trigger types for a few
+peripheral interrupts. The peripheral numbers in the DTB (`interrupts = <0 N type>`,
+N is a raw GIC SPI) are already the real INTIDs; a bare-metal/GICv3 path can use them
+directly and ignore sysirq unless an interrupt turns out to be mis-typed.
 
-## 3. Memory mapMeasured from the LK FDT of a **3 GiB** unit (hataketsu/mt6768-mainline-notes, see
-sources at the bottom). **This phone is the 4 GiB SKU** (user, 2026-10-24), so expect an
-additional bank above 4 GiB; the exact split is measured from the live FDT in M1.
+## 3. Memory
 
-| Fact | Value | Status |
-| --- | --- | --- |
-| Installed RAM | **4 GB** | CONFIRMED by the user (not yet read on the phone) |
-| DRAM bank 0 (3 GiB unit) | `0x40000000` + `0xc0000000` (ends exactly at 4 GiB) | CONFIRMED on that unit |
-| DRAM above 4 GiB | none on the 3 GiB unit; a 4 GiB unit is expected to report a second bank (typically `0x1_00000000` or `0x1_40000000`) | HYPOTHESIS for this SKU — measure in M1 |
-| `BOARD_KERNEL_BASE` (Android image layout) | `0x40078000`, kernel load `0x40080000` | CONFIRMED (LineageOS BoardConfig) |
-| LK FDT physical address | `0x4bc80000` (= `BOARD_KERNEL_BASE + BOARD_DTB_OFFSET`, also the boot tags address) | CONFIRMED (port notes) |
-| Mainline DTS `memory@40000000` | `reg = <0x0 0x40000000 0x0 0x3e605000>` (~997 MiB) | CONFIRMED as DTS content; **do not** read it as the installed RAM size |
+| Fact | Value | Source | Status |
+| --- | --- | --- | --- |
+| Installed RAM | **4 GB** | user (2026-10-24) | CONFIRMED by owner |
+| `memory` node in the shipped DTB | `reg = <0x0 0x40000000 0x0 0x3e605000>` (~997 MiB) | `boot.img` DTB | CONFIRMED as DTB content — **LK patches this at boot**, so it is not the installed size |
+| Real DRAM map | — | — | UNKNOWN until the shim prints the live `/memory` (M2). On 3 GiB units LK reports `0x40000000`+`0xc0000000`; a 4 GiB unit should add a bank above 4 GiB |
+| LK FDT address | `0x4bc80000` (= `BOARD_KERNEL_BASE + BOARD_DTB_OFFSET`, same as the tags address) | `boot.img` header: `tags_addr`/`dtb_addr` = `0x4bc80000` | CONFIRMED |
+| Android kernel load | `0x40080000` | header (`--base 0x40078000`, `--kernel_offset 0x8000`) | CONFIRMED |
+| Android ramdisk load | `0x47c80000` | header | CONFIRMED |
 
-### Reserved / carve-out regions (LK FDT, start + size)
-
-These must never be handed to XNU or DMA-ed into. Copy of the 18 regions reported by
-the bootloader on the 3 GiB unit:
+### Carve-outs, from the LK FDT of a 3 GiB unit (start + size)
 
 | Node | Start | Size |
 | --- | --- | --- |
@@ -83,221 +76,197 @@ the bootloader on the 3 GiB unit:
 | `mblock-14-SCP-reserved` | `0x9f900000` | `0x00600000` |
 | `mblock-15-ccci_tag_mem` | `0x9ffef000` | `0x00010000` |
 | `mblock-1-dramc-rk0` | `0x9ffff000` | `0x00001000` |
-| `mblock-16-ccci` (modem-shared) | `0xae000000` | `0x10000000` |
+| `mblock-16-ccci` (modem) | `0xae000000` | `0x10000000` |
 | `mblock-5-atf-log-reserved` | `0xbfe00000` | `0x00040000` |
 | `mblock-12-atf-ramdump-memory` | `0xbff80000` | `0x00080000` |
 | `mblock-2-dramc-rk1` | `0xfffff000` | `0x00001000` |
 
-Consequence for XNU: the usable contiguous window is small. On a 3 GiB unit the only
-sane kernel region is **`0x80000000`–`0xae000000`** (768 MiB) minus `0x9f900000`/`0x9ffff000`,
-or **`0x50000000`–`0x70000000`** (512 MiB, below TEE). This is *very* different from
-sweet's 3.95 GiB: a 3 GiB phone will be RAM-starved and the plan commits to `cpus=1`
-plus a small physmap first. Exact placement is decided from the live FDT in M2, not here.
-
-## 3b. On-device read, 2026-10-24 (M1, partial)
-
-Read with `fastboot` on the actual phone. No partition was written.
-
-| Variable | Value | Note |
-| --- | --- | --- |
-| `product` | `lancelot` | CONFIRMED on device |
-| `unlocked` | `yes` | bootloader already unlocked |
-| `secure` | `no` | no secure boot enforcement |
-| `hw-revision` | `ca00` | — |
-| `max-download-size` | `0x8000000` (128 MiB) | sparse chunks must stay below this |
-| `logical-block-size` / `erase-block-size` | 512 B / 512 KiB | — |
-| `battery-voltage` | 3736 mV, `battery-soc-ok: yes` | phone in a healthy state |
-| RAM | 4 GB (user) | second bank still to be measured |
-
-The phone runs a **custom ROM (AfterlifeOS), not MIUI** (user, 2026-10-24). The
-restore material therefore comes from the AfterlifeOS build for lancelot, not from a
-Xiaomi fastboot ROM; the partition layout below is the one the current firmware
-exposes.
-
-Full table from a clean `getvar all` (52 entries; sizes in the bootloader's hex, with
-MiB for reading):
-
-| Partition | Size | Partition | Size |
-| --- | --- | --- | --- |
-| `boot` | `0x4000000` = 64 MiB | `boot_para` | `0x1a00000` = 26 MiB |
-| `cache` | `0x1b000000` = 432 MiB | `cust` | `0x40000000` = 1 GiB |
-| `devinfo` | 8 MiB | `dtbo` | `0x1000000` = 16 MiB |
-| `efuse` | `0x80000` = 512 KiB | `exaid` | 384 MiB |
-| `expdb` | `0x1400000` = 20 MiB | `ffu` | `0xb80000` = 11.5 MiB |
-| `flashinfo` | 16 MiB | `frp` | `0x100000` = 64 KiB |
-| `gsort` | 16 MiB | `gz1`, `gz2` | 16 MiB each |
-| `lk`, `lk2` | `0x200000` = 2 MiB each | `logo` | 8 MiB |
-| `md1img` | `0x8000000` = 128 MiB | `md_udc` | `0x169a000` = 22.6 MiB |
-| `metadata` | `0x2000000` = 32 MiB | `minidump` | 128 MiB |
-| `misc` | `0x80000` = 512 KiB | `nvcfg` | `0x2000000` = 32 MiB |
-| `nvdata` | `0x4000000` = 64 MiB | `nvram` | `0x4000000` = 64 MiB |
-| `otp` | `0x2b00000` = 43 MiB | `para` | 512 KiB |
-| `persist` | `0x3000000` = 48 MiB | `persistbak` | 48 MiB |
-| `pgpt` | 32 KiB | `preloader` | `0x80000` = 512 KiB |
-| `proinfo` | `0x300000` = 3 MiB | `protect1` | 8 MiB |
-| `protect2` | `0xb5e000` = 11.4 MiB | **`recovery`** | **`0x4000000` = 64 MiB** |
-| `scp1`, `scp2` | 6 MiB each | `sec1` | `0x200000` = 2 MiB |
-| `seccfg` | 8 MiB | `sgpt` | 32 KiB |
-| `spmfw` | 1 MiB | `sspm_1`, `sspm_2` | 1 MiB each |
-| `super` | `0x1c0000000` = 7 GiB | `tee1`, `tee2` | `0x500000` = 5 MiB each |
-| `userdata` | `0xc1f4f8000` ≈ 48.35 GiB | `vbmeta`, `vbmeta_system`, `vbmeta_vendor` | `0x800000` = 8 MiB each |
-
-**`recovery` exists**, so the approved M2 path (flash the shim into `recovery`, leave
-Android's `boot` untouched) is viable on this phone. `boot` and `recovery` are the
-same size (64 MiB), which also makes a shim image interchangeable between them if
-needed.
-
-Operational findings, both reproduced on this unit:
-
-- **`fastboot fetch <partition>` is not supported**: the host waits forever and no
-  data arrives. There is no fastboot-side partition backup.
-- **`fastboot boot` wedges LK**: the host wraps the file, starts `Sending 'boot.img'`
-  and never completes; afterwards the bootloader enumerates on USB but stops
-  answering `getvar` until it is power-cycled. Consistent with the two reports that
-  the command is not implemented.
+Consequence: on a 3 GiB unit the only sane kernel window is `0x80000000`–`0xae000000`
+(768 MiB, minus `0x9f900000`/`0x9ffff000`). A 4 GiB phone presumably has more above
+4 GiB, but the shim must read the live FDT before choosing a window. Plan for
+`cpus=1` and a small physmap first.
 
 ## 4. Boot chain
 
 | Fact | Value | Source | Status |
 | --- | --- | --- | --- |
-| Chain | BROM → preloader → ATF (BL31) → LK (BL33) → `boot.img` | MTK platform; LK FDT shows ATF/TEE carve-outs | CONFIRMED (structure) |
-| `fastboot boot` | **NOT supported**: LK answers `Unrecognized command boot` | XDA lancelot thread; hataketsu port notes ("crashes with any image, including the known-good LineageOS boot.img") | CONFIRMED, two independent reports |
-| Boot image header | **v2**, page size 2048 | LineageOS `mt6768-common/BoardConfigCommon.mk`, TWRP `a14_lancelot` | CONFIRMED |
-| Load addresses | kernel `0x40080000`, ramdisk `0x47c80000`, second `0x100000000`, tags `0x4bc80000`, dtb `0x4bc80000` | same (`BOARD_KERNEL_BASE 0x40078000` + offsets) | CONFIRMED |
-| Stock cmdline prefix | `bootopt=64S3,32N2,64N2` | same | CONFIRMED |
-| DTB in boot.img | yes (`BOARD_INCLUDE_DTB_IN_BOOTIMG`), plus a separate `dtbo` partition | TWRP BoardConfig | CONFIRMED |
-| Kernel compression | LK decompresses the kernel slot; a raw ARM64 `Image` crashed LK in the mainline port, gzip `Image.gz` is what the working trees ship | hataketsu port notes | CONFIRMED (report); we ship our own raw payload format and **must** test whether LK accepts an uncompressed "kernel" |
-| A/B slots | **no** (single `boot`, `recovery`) | LineageOS BoardConfig + fstab | CONFIRMED |
-| Dynamic partitions | yes (`super` holds system/system_ext/vendor/product) | LineageOS fstab/BoardConfig | CONFIRMED |
-| Key combos | fastboot = Vol- + Power, recovery = Vol+ + Power | LineageOS lancelot wiki | CONFIRMED |
+| Chain | BROM → preloader → ATF (BL31) → LK (BL33) → `boot.img` | MTK platform; ATF/TEE carve-outs in the LK FDT | CONFIRMED |
+| `fastboot boot` | **NOT implemented**: the transfer stalls at `Sending 'boot.img'` and LK stops answering `getvar` until a power cycle | reproduced on this phone 2026-10-24; XDA thread; hataketsu notes | CONFIRMED |
+| `fastboot fetch` | **not implemented**: the host waits forever, no data | reproduced on this phone | CONFIRMED |
+| Boot image header | **v2**, page size **2048**, header_size 1660 | `boot.img` header (unpacked) | CONFIRMED |
+| Load addresses | kernel `0x40080000`, ramdisk `0x47c80000`, second `0x100000000`, tags `0x4bc80000`, dtb `0x4bc80000` | header | CONFIRMED |
+| Kernel payload | **gzip**, 13 505 892 bytes (LK decompresses; a raw `Image` crashed LK in the mainline port) | `boot.img` + port notes | CONFIRMED |
+| Ramdisk | 1 511 850 bytes (LineageOS recovery ramdisk) | `boot.img` | CONFIRMED |
+| DTB in boot.img | 118 867 bytes, at image offset 15 022 080 | `boot.img` | CONFIRMED |
+| Stock cmdline | `bootopt=64S3,32N2,64N2 androidboot.serialconsole=0` | header | CONFIRMED |
+| A/B slots | none | `ro.boot.slot_suffix` empty; `getvar all` | CONFIRMED |
+| Dynamic partitions | yes (`super` 7 GiB) | `getvar all`; fstab | CONFIRMED |
+| Key combos | fastboot = Vol- + Power, recovery = Vol+ + Power | LineageOS wiki; reproduced | CONFIRMED |
 
-### Partitions (from the shared MT6768 fstab)
+### Partitions (full `getvar all`, 52 entries)
 
-`boot`, `recovery`, `dtbo`, `vbmeta`, `vbmeta_vendor`, `vbmeta_system`, `super`,
-`userdata`, `metadata`, `cache`, `misc`, `para`, `frp`, `protect1`, `protect2`,
-`nvdata`, `nvcfg`, `persist`, `nvram`, `proinfo`, `expdb`, `boot_para`, `lk`, `lk2`,
-`tee1`, `tee2`, `logo`, `scp1`, `scp2`, `sspm_1`, `sspm_2`, `md1img`, `md1dsp`,
-`gz1`, `gz2`, `spmfw`, `otp`, `seccfg`.
+| Partition | Size | Partition | Size |
+| --- | --- | --- | --- |
+| `boot` | `0x4000000` = 64 MiB | `boot_para` | 26 MiB |
+| `cache` | 432 MiB | `cust` | 1 GiB |
+| `devinfo` | 8 MiB | `dtbo` | 16 MiB |
+| `efuse` | 512 KiB | `exaid` | 384 MiB |
+| `expdb` | 20 MiB | `ffu` | 11.5 MiB |
+| `flashinfo` | 16 MiB | `frp` | 64 KiB |
+| `gsort` | 16 MiB | `gz1`, `gz2` | 16 MiB each |
+| `lk`, `lk2` | 2 MiB each | `logo` | 8 MiB |
+| `md1img` | 128 MiB | `md_udc` | 22.6 MiB |
+| `metadata` | 32 MiB | `minidump` | 128 MiB |
+| `misc` | 512 KiB | `nvcfg` | 32 MiB |
+| `nvdata` | 64 MiB | `nvram` | 64 MiB |
+| `otp` | 43 MiB | `para` | 512 KiB |
+| `persist` | 48 MiB | `persistbak` | 48 MiB |
+| `pgpt` | 32 KiB | `preloader` | 512 KiB |
+| `proinfo` | 3 MiB | `protect1` | 8 MiB |
+| `protect2` | 11.4 MiB | **`recovery`** | **64 MiB** |
+| `scp1`, `scp2` | 6 MiB each | `sec1` | 2 MiB |
+| `seccfg` | 8 MiB | `sgpt` | 32 KiB |
+| `spmfw` | 1 MiB | `sspm_1`, `sspm_2` | 1 MiB each |
+| `super` | 7 GiB | `tee1`, `tee2` | 5 MiB each |
+| `userdata` | ≈48.35 GiB | `vbmeta`, `vbmeta_system`, `vbmeta_vendor` | 8 MiB each |
 
-`userdata` is reached through `/dev/block/platform/bootdevice/by-name/userdata`
-(never a hard-coded `mmcblk0pN`; the numbering differs between firmware revisions).
+**`recovery` exists**, so the chosen M2 boot path is viable: the shim goes into
+`recovery`, Android's `boot` is never touched.
 
-Build-config sizes (not a verified GPT dump): `boot` 64 MiB, `recovery` 64 MiB,
-`dtbo` 16 MiB, `super` 7.0–8.5 GiB depending on the tree.
+`userdata` is reached through `/dev/block/platform/bootdevice/by-name/userdata`, never
+a hard-coded `mmcblk0pN`.
 
 **Never write:** `preloader`, `lk`/`lk2`, `tee1`/`tee2`, `seccfg`, `nvram`, `nvdata`,
-`nvcfg`, `protect1`/`protect2`, `proinfo`, `persist`, `md1img`/`md1dsp`, `frp`,
-`metadata`, and anything calibration/identity related. `userdata` is the only
-write target by default; `boot`/`recovery` only with a verified backup and an
-explicit confirmation (see `docs/RECOVERY.md`).
+`nvcfg`, `protect1`/`protect2`, `proinfo`, `persist`/`persistbak`, `md1img`/`md1dsp`,
+`frp`, `metadata`, `efuse`, `sec1`, `otp` and anything calibration/identity related.
+`userdata` is the only default write target; `boot`/`recovery` need a verified backup
+and an explicit confirmation in the moment (see `docs/RECOVERY.md`).
 
-## 5. Storage
+## 5. Storage (eMMC)
 
 | Fact | Value | Source | Status |
 | --- | --- | --- | --- |
-| eMMC | 5.1, 8-bit, non-removable, DDR/HS200/HS400 at 1.8 V, max 200 MHz | vendor `cust_mt6768_msdc.dtsi` | CONFIRMED |
-| eMMC controller | **MSDC0**, base `0x11230000` | MTK family convention; the Lancelot DT did not print the base | HYPOTHESIS — confirm from the stock DTB |
-| eMMC clocks | `CLK_IFR_MSDC0_SRC`, `CLK_IFR_MSDC0`, `CLK_IFR_FAES_FDE` from `infracfg_ao`; source `MSDC0_CLKSRC_400MHZ` | vendor MSDC DTS | CONFIRMED |
-| CQE / CQHCI | not established for lancelot | — | UNKNOWN |
-| SD card | MSDC1, 4-bit, card-detect GPIO 18, `no-mmc` | vendor MSDC DTS | CONFIRMED |
+| eMMC controller | **MSDC0** `0x11230000`, size `0x10000`, IRQ **SPI 100** | DTB `msdc@11230000`, `mmc@11230000` | CONFIRMED |
+| MSDC0 top block | `0x11cd0000`, size `0x1000` | DTB `msdc0_top@11cd0000` | CONFIRMED |
+| SD card | MSDC1 `0x11240000`, IRQ SPI 101 (not the root) | DTB | CONFIRMED |
+| Bus | 8-bit, non-removable, `mmc-ddr-1_8v`, HS200, **HS400**, `max-frequency = 200 MHz` | DTB `mmc0` | CONFIRMED |
+| CQE | **`mediatek,cqhci`** present | DTB `mmc0` | CONFIRMED |
+| Clocks | `clocks = <topckgen …>, <infracfg_ao …>` named `source`, `hclk`, `source_cg`, `crypto_clk` | DTB `mmc0` | CONFIRMED (phandles unresolved; resolve before programming) |
 
-This replaces the whole UFS driver of sweet/beryllium. It is the largest single block
-of new kernel code in the plan (M4).
+This replaces the whole UFS driver of sweet/beryllium and is the largest block of new
+kernel code (M4).
 
 ## 6. Display
 
 | Fact | Value | Source | Status |
 | --- | --- | --- | --- |
-| Panel | `hx83112b_fhdp_dsi_cmd_auo_rt5081_drv` → Himax HX83112B bridge, AUO panel, RT5081 backlight | vendor `k69v1_64.dts` / lancelot DT overlay | CONFIRMED |
-| Resolution | 1080 × 2340 | same | CONFIRMED |
-| Mode | **command mode** (`_dsi_cmd_`) | same | CONFIRMED |
-| Bootloader framebuffer | `atag,videolfb` under `/chosen`: base **`0x7e605000`**, `vramSize = 0x017e8000` (~25 MiB) | same | CONFIRMED (metadata) |
-| Framebuffer reserved region | `0x7dcb0000` + `0x02250000` (the base above sits inside it) | LK FDT carve-outs | CONFIRMED |
-| Pixel format / stride | — | — | UNKNOWN — read it from the live FDT/`/chosen` in the shim; do not assume `w*4` |
-| Continuous scanout after boot | — | — | UNKNOWN. Command-mode DSI usually needs a refresh kick, so M2 must prove whether the LK framebuffer keeps being scanned out or the panel holds the last frame in GRAM |
-| MMSYS | `0x14000000` (mutex `0x14016000`) | vendor `mt6768.dts` | CONFIRMED |
-| OVL0 / DSI0 | `0x1400b000` / `0x14014000` | family-level | HYPOTHESIS — confirm in the stock DTB |
-| Panel timings | porches, pixel clock, DSI lanes | — | UNKNOWN (vendor `lcm` driver in the kernel source) |
+| Panel | `hx83112b_fhdp_dsi_cmd_auo_rt5081_drv` (Himax HX83112B, AUO, RT5081 backlight) | DTBO `/chosen atag,videolfb-lcmname` | CONFIRMED |
+| Resolution / mode | 1080×2340, **command mode** (`_dsi_cmd_`) | DTBO; vendor DTS | CONFIRMED |
+| Bootloader framebuffer | base **`0x7e605000`** (`fb_base_l` = 0x7e605000, `fb_base_h` = 0), inside the `0x7dcb0000`+34 MiB carve-out | DTBO atag values; LK FDT | CONFIRMED |
+| VRAM size | `0x017e8000` (25.0 MiB) | DTBO `atag,videolfb-vramSize` | CONFIRMED |
+| Panel fps tag | `0x1770` = 6000 (60.00 Hz) | DTBO | CONFIRMED |
+| LCM inited at LK | `islcmfound = 1`, `islcm_inited = 0` | DTBO | CONFIRMED |
+| Pixel format / stride | — | — | UNKNOWN — derive from `vramSize` and geometry at M2, do not assume `w*4` |
+| Continuous scanout after LK | — | — | UNKNOWN. Command-mode DSI usually needs a refresh kick; M2 decides |
+| MMSYS mutex | `0x14016000`, size `0x1000` | DTB | CONFIRMED |
+| DSI0 | `0x14014000`, size `0x1000`, IRQ SPI 238 | DTB | CONFIRMED |
+| OVL0_2L | `0x1400c000`, size `0x1000`, IRQ SPI 242 | DTB | CONFIRMED |
+| Display clocks | `dispsys` node lists MMSYS/SMI/OVL/RDMA/WDMA/COLOR/CCORR/AAL/GAMMA/DITHER/DSI0 clocks | DTB `dispsys` | CONFIRMED (names; phandles unresolved) |
 
-iOS presents an iPhone X canvas (1125×2436). Lancelot is 1080×2340 (19.5:9 vs 19.5:9,
-so a straight scale is possible with small letterboxing). Decision: render at
-`750×1624 @2x` like beryllium's `--display-scale 2` and scale into the panel, or
-scale pixel-for-pixel. Deferred to M5; it is a `mkadt.py` value, not a kernel change.
+iOS presents an iPhone X canvas (1125×2436). Lancelot is 1080×2340; the mapping
+(scale vs letterbox, @2x vs @3x) is a `mkadt.py` value decided in M5.
 
 ## 7. Input
 
 | Fact | Value | Source | Status |
 | --- | --- | --- | --- |
-| Touch bus | **SPI0** node, compatible list covering Novatek NVT and Focaltech FTS | vendor `lancelot.dts` | CONFIRMED (bus) |
-| Touch controller | NT36672-class vs FT8719P | node lists both variants | UNKNOWN — resolve from the stock DTB / live FDT in M1 |
-| Touch IRQ / reset | IRQ GPIO 1 (falling edge EINT), reset GPIO 92 | vendor `lancelot/cust.dtsi` | CONFIRMED |
-| Touch supply | PMIC rail `vldo28` | same | CONFIRMED |
-| SPI0 controller base | — | — | UNKNOWN — from the stock DTB |
-| Keys | MTK keypad block **KP** `0x10010000` (GIC SPI 73), software power key code 116 / hardware index 8 | vendor `mt6768.dts`, `cust.dtsi` | CONFIRMED (block); physical volume-key routing UNKNOWN |
-| PMIC | **MT6358-compatible** behind **PWRAP** `0x1000d000` (GIC SPI 194, level-high), PIO-routed interrupt | vendor `mt6768.dts` | CONFIRMED |
-| Charger | external **SMB1351** at I2C7 address `0x55`, interrupt GPIO 20 | vendor `lancelot.dts` | CONFIRMED (node); fuel gauge UNKNOWN |
-| Battery gauge | MT6358 BATON/FG or external | — | UNKNOWN |
+| Touch controller | **Novatek NT36672** over SPI (`novatek36672,NVT-ts-spi`; the DTBO also lists a Focaltech compatible, but the Novatek criteria tables are the fitted one) | DTBO `novatek36672@0` | CONFIRMED |
+| Bus | **SPI0** `0x1100a000`, size `0x1000`, IRQ **SPI 138**, max 8 MHz (`0x7a1200`) | DTB `spi0`; DTBO | CONFIRMED |
+| Reset / IRQ | reset **GPIO 92** (`0x5c`), IRQ **GPIO 1** (`0x2001` = active-low + edge) | DTBO | CONFIRMED |
+| Protocol extras | `swrst-n8-addr 0x3f0fe`, `spi-rd-fast-addr 0x3f310`, 10 touch points | DTBO | CONFIRMED |
+| Touch rail | PMIC `vldo28` | vendor DTS | CONFIRMED |
+| Keypad | MTK **KP** `0x10010000`, size `0x1000`, IRQ **SPI 73**, falling edge; `mediatek,boot_mode = 1` | DTB `keypad` | CONFIRMED |
+| PMIC | **MT6358** behind **PWRAP** `0x1000d000`, IRQ SPI 194, PIO-routed interrupt | DTB `pwrap`/`mt6358-pmic` | CONFIRMED |
+| Charger | external **SMB1351** at I2C7 address `0x55`, interrupt GPIO 20 | vendor DTS | CONFIRMED (node); fuel gauge UNKNOWN |
 
-Battery can start static (100 %, charging icon) exactly as sweet did; a real gauge
-is M6+ polish.
+Battery can start static (100 %, charging icon) as on sweet; a real gauge is M6+.
 
 ## 8. Debug channels
 
 | Channel | Value | Status |
 | --- | --- | --- |
-| UART0 | `0x11002000`, SPI 112; `serial0` alias enabled in the Xiaomi common DTS | CONFIRMED (DT). Physical access on the lancelot PCB: UNKNOWN |
-| UART1 | `0x11003000`, SPI 113, disabled by default | CONFIRMED (DT) |
-| USB | MTK MUSB-style controller (not DWC3); `fastboot` enumerates at USB 2.0 | HYPOTHESIS — confirm from the stock DTB |
-| Framebuffer console | same approach as sweet: draw into the LK framebuffer | planned |
-| Persistent log ring | same approach as sweet: reserved area at the end of `userdata` | planned (needs MSDC write, M4) |
-| ramoops / pstore | `0x4d010000` + `0xe0000`, Linux console at `0x4d05f000` | CONFIRMED (LK FDT) — a second log channel worth using before MSDC works |
+| UART0 | `0x11002000`, size `0x1000`, IRQ SPI 112; `apuart0` alias present | CONFIRMED (DT). Physical access on the PCB: UNKNOWN |
+| UART1 | `0x11003000`, IRQ SPI 113 | CONFIRMED (DT) |
+| USB | MTK MUSB-style controller (`usb1p_sif@11210000` is a sibling block) | HYPOTHESIS — confirm in the stock DTB before writing a driver |
+| Framebuffer console | draw into `0x7e605000` from the shim and XNU | planned |
+| Persistent log ring | end of `userdata` (needs MSDC write, M4) | planned |
+| ramoops / pstore | `0x4d010000` + `0xe0000`, Linux console at `0x4d05f000` | CONFIRMED (LK FDT) — usable before MSDC works |
 
-There is no evidence of an accessible debug UART without opening the case; the
-framebuffer remains the primary console (the shim can draw before XNU runs).
+No evidence of an accessible debug UART without opening the case. Framebuffer remains
+the primary console.
 
-## 9. Watchdog
+## 9. Watchdog and resets
 
 | Fact | Value | Source | Status |
 | --- | --- | --- | --- |
-| Block | TOPRGU `watchdog@10007000`, size `0x100` | mainline `mt6768.dtsi` | CONFIRMED |
-| Registers | `WDT_MODE 0x00`, `WDT_RST 0x08`, `WDT_SWRST 0x14` | `drivers/watchdog/mtk_wdt.c` | CONFIRMED |
-| Disable | clear `WDT_MODE` bit 0 (EN) while writing `0x22000000` (key) into the upper bits | same driver `mtk_wdt_stop()` | CONFIRMED |
+| Block | `toprgu@10007000`, size **`0x1000`**, IRQ SPI 156 | DTB | CONFIRMED |
+| `mediatek,rg_dfd_timeout` | `0xa0` | DTB | CONFIRMED |
+| Registers | `WDT_MODE 0x00`, `WDT_RST 0x08`, `WDT_SWRST 0x14` | Linux `mtk_wdt.c` | CONFIRMED |
+| Disable | clear `WDT_MODE` bit 0 (EN) while writing key `0x22000000` | `mtk_wdt_stop()` | CONFIRMED |
 | `WDT_RST` reload key | `0x1971` | same | CONFIRMED |
-| `WDT_SWRST` key | `0x1209` (software reset, **not** a disable) | same | CONFIRMED |
+| `WDT_SWRST` key | `0x1209` (reset, not disable) | same | CONFIRMED |
+| Reboot mode | `syscon-reboot-mode` at TOPRGU offset `0x24`, mask `0x0f` (1 charger, 2 recovery, 3 bootloader, 4 dm-verity corrupt) | DTB | CONFIRMED |
 
-The shim must stop the watchdog before doing anything slow (first action after EL1),
-otherwise the port can reset mid-probe and look like a random bootloop.
+The shim stops the watchdog before anything slow, or later measurements are unreliable.
 
-## 10. Clocks and power blocks (addresses only)
+## 10. Clocks and power blocks
 
 | Block | Base | Size | Source |
 | --- | --- | --- | --- |
-| topckgen | `0x10000000` | `0x1000` | mainline `mt6768.dtsi` |
-| infracfg_ao | `0x10001000` | `0x1000` | same |
-| pericfg | `0x10003000` | `0x1000` | same |
-| pinctrl | `0x10005000` | — | same |
-| scpsys / spm | `0x10006000` | `0x1000` | same |
-| apmixedsys | `0x1000c000` | `0x1000` | same |
-| pwrap | `0x1000d000` | `0x1000` | same |
-| mcucfg | `0x0c530000` | `0x10000` | same |
+| topckgen | `0x10000000` | `0x1000` | DTB |
+| infracfg_ao | `0x10001000` | `0x1000` | DTB |
+| scpsys (SPM) | `0x10001000`, `0x10006000`, … | `0x1000` each | DTB |
+| pericfg | `0x10003000` | `0x1000` | DTB |
+| pinctrl (`pio`) | `0x10005000` | — | DTB |
+| apmixedsys | `0x1000c000` | `0x1000` | DTB |
+| pwrap | `0x1000d000` | `0x1000` | DTB |
+| mcucfg | `0x0c530000` | `0x10000` | DTB |
 
-Mainline lancelot needs `clk_ignore_unused pd_ignore_unused` with the stock
-bootloader, i.e. Linux relies on firmware-programmed clocks/power. A bare-metal shim
-should therefore **preserve** what LK set up and add votes only where a measurement
-proves something is off (display, MSDC, touch rail).
+Mainline lancelot needs `clk_ignore_unused pd_ignore_unused` with the stock bootloader:
+Linux relies on firmware-programmed clocks/power. A bare-metal shim preserves what LK
+set up and adds votes only where a measurement proves something is off.
+
+## 11. On-device read, 2026-10-24 (M1)
+
+| Variable | Value |
+| --- | --- |
+| `product` | `lancelot` |
+| `unlocked` | `yes` (bootloader already unlocked) |
+| `secure` | `no` |
+| `hw-revision` | `ca00` |
+| `max-download-size` | `0x8000000` (128 MiB) |
+| `logical-block-size` / `erase-block-size` | 512 B / 512 KiB |
+| `battery-voltage` | 3736 mV, `battery-soc-ok: yes` |
+| ROM | AfterlifeOS, Android 16, `BP2A.250605.031.A2`, build type **user** (no `adb root`) |
+| Base firmware fingerprint | `Redmi/lancelot_global/lancelot:11/RP1A.200720.011/V12.5.6.0.RJCMIXM` |
+| Screen (Android) | 1080×2340, density 440 |
+| `/proc/cmdline`, `/proc/device-tree` | permission denied for the `shell` user (SELinux) |
+
+Operational findings reproduced on this unit: `fastboot fetch` unsupported; a
+`fastboot boot` attempt wedges LK until the phone is power-cycled.
 
 ## Sources
 
-1. mainline MT6768 SoC DTS — <https://github.com/mt6768-mainline/linux/blob/6.18/arch/arm64/boot/dts/mediatek/mt6768.dtsi>
-2. mainline Xiaomi common DTS — <https://github.com/mt6768-mainline/linux/blob/6.18/arch/arm64/boot/dts/mediatek/mt6769t-xiaomi-common.dtsi>
-3. mainline lancelot panel include — <https://github.com/mt6768-mainline/linux/blob/6.18/arch/arm64/boot/dts/mediatek/mt6769t-xiaomi-lancelot-tianma.dtsi>
-4. device-tested LK FDT and carve-outs — <https://github.com/hataketsu/mt6768-mainline-notes/blob/master/README.md>
-5. U-Boot / LK handoff notes — <https://github.com/hataketsu/mt6768-mainline-notes/blob/master/uboot-patches/README.md>
-6. LineageOS shared boot config — <https://github.com/kitw4y/android_device_xiaomi_mt6768-common/blob/lineage-20/BoardConfigCommon.mk>
-7. LineageOS MT6768 fstab — <https://github.com/kitw4y/android_device_xiaomi_mt6768-common/blob/lineage-20/rootdir/etc/fstab.mt6768>
-8. LineageOS lancelot board config — <https://github.com/LineageOS/android_device_xiaomi_lancelot/blob/lineage-20/BoardConfig.mk>
-9. TWRP lancelot tree — <https://github.com/Shas45558/twrp_tree_mt6768/blob/a14_lancelot/BoardConfig.mk>
-10. Xiaomi MT6768 vendor kernel (display/touch/keys/PMIC) — <https://github.com/smlinux/kernel_lancelot> and <https://github.com/Redmi-MT6768/android_kernel_xiaomi_mt6768>
+1. Shipped board DTB — `boot.img` of LineageOS 24.0 lancelot (20261024), unpacked with `tools/unpack_bootv2.py`, decompiled with `dtc`
+2. Shipped board overlay — `dtbo.img` (same build), entry 0, id 0x0
+3. mainline MT6768 SoC DTS — <https://github.com/mt6768-mainline/linux/blob/6.18/arch/arm64/boot/dts/mediatek/mt6768.dtsi>
+4. mainline Xiaomi common DTS — <https://github.com/mt6768-mainline/linux/blob/6.18/arch/arm64/boot/dts/mediatek/mt6769t-xiaomi-common.dtsi>
+5. device-tested LK FDT / carve-outs — <https://github.com/hataketsu/mt6768-mainline-notes/blob/master/README.md>
+6. U-Boot / LK handoff notes — <https://github.com/hataketsu/mt6768-mainline-notes/blob/master/uboot-patches/README.md>
+7. LineageOS shared boot config — <https://github.com/kitw4y/android_device_xiaomi_mt6768-common/blob/lineage-20/BoardConfigCommon.mk>
+8. LineageOS MT6768 fstab — <https://github.com/kitw4y/android_device_xiaomi_mt6768-common/blob/lineage-20/rootdir/etc/fstab.mt6768>
+9. LineageOS lancelot board config — <https://github.com/LineageOS/android_device_xiaomi_lancelot/blob/lineage-20/BoardConfig.mk>
+10. Xiaomi MT6768 vendor kernel (display/touch/keys/PMIC) — <https://github.com/smlinux/kernel_lancelot>, <https://github.com/Redmi-MT6768/android_kernel_xiaomi_mt6768>
 11. Linux MTK watchdog driver — <https://github.com/torvalds/linux/blob/master/drivers/watchdog/mtk_wdt.c>
-12. LineageOS lancelot wiki (keys, unlock) — <https://wiki.lineageos.org/devices/lancelot/>
-13. `fastboot boot` failure reports — <https://xdaforums.com/t/how-do-i-get-a-recovery-on-my-redmi-9-lancelot.4442047/>, <https://github.com/hataketsu/mt6768-mainline-notes>
+12. LineageOS lancelot wiki (keys, specs) — <https://wiki.lineageos.org/devices/lancelot/>
+13. `fastboot boot` reports — <https://xdaforums.com/t/how-do-i-get-a-recovery-on-my-redmi-9-lancelot.4442047/>, <https://github.com/hataketsu/mt6768-mainline-notes>
