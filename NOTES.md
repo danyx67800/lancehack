@@ -522,7 +522,8 @@ jump ran; xnu's stage-0 band lands white inside its left end, and any
 bytes, image `shim/out/shim-boot-lancelot.img` **16 660 480 bytes**, SHA-256
 `7c5b2a6a5fe48333f08150850033610aabf0037b3281769c60756fdc5eea8540`. Flash target
 `recovery` only, restore `backup/lancelot-lineage/recovery.img`, boot from a powered-off
-phone with **Vol+ + Power**.
+phone with **Vol+ + Power**. Flashed (`Sending 16270 KB / Writing OKAY`), waiting for the
+observation.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
