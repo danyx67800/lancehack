@@ -96,9 +96,28 @@ const char *loader_boot(uintptr_t dtb)
 	con_hex("VIRT", p->virt_base);
 	con_hex("ENTRY", p->entry_va);
 
-	/* The payload must not overlap where the kernel goes. */
-	if (rd_end > p->phys_base && rd_start < p->phys_base + p->mem_size)
-		return "ramdisk overlaps kernel memory";
+	/*
+	 * The payload sits in the ramdisk and is the source of every copy below,
+	 * so it may not overlap what we write: the segments, then the ADT and
+	 * boot_args behind kernel_end. Checking against phys_base+mem_size
+	 * instead would reject almost any ramdisk LK picks, because that window
+	 * is the whole DRAM the kernel will manage, not the part we touch now.
+	 */
+	uintptr_t dst_lo = ~(uintptr_t)0, dst_hi = 0;
+	for (uint32_t i = 0; i < p->nsegs; i++) {
+		uintptr_t lo = p->segs[i].vmaddr + pa_of_va_base;
+		uintptr_t hi = lo + p->segs[i].vmsize;
+		if (lo < dst_lo)
+			dst_lo = lo;
+		if (hi > dst_hi)
+			dst_hi = hi;
+	}
+	uintptr_t meta_hi = p->kernel_end + pa_of_va_base + p->adt_size + 2 * PAGE_16K;
+	if (meta_hi > dst_hi)
+		dst_hi = meta_hi;
+	con_hex2("DST", "lo=", dst_lo, "hi=", dst_hi);
+	if (rd_end > dst_lo && rd_start < dst_hi)
+		return "ramdisk overlaps kernel image";
 
 	for (uint32_t i = 0; i < p->nsegs; i++) {
 		const struct payload_seg *s = &p->segs[i];
