@@ -99,8 +99,281 @@ No evidence yet that the panel is being refreshed at all: the DTBO's baked value
 sends one. If the next boot is still black, the 120 s reset (new image `42153172`) is
 the breadcrumb that tells execution apart from a display problem.
 
-**TEST #3 pending:** `42153172` flashed into `recovery`; boot it and time the reboot
-(~2 min = ran to the end, ~3 s = crashes early).
+**TEST #3 (2026-10-24, `42153172`): still a two-second reset**, so the 120 s hold was
+never reached even with the 13 MHz fallback. That means `CNTFRQ_EL0` is not the whole
+story: either the delay is still wrong (a garbage but non-zero CNTFRQ would do it) or
+the probe faults early. Note the sequence: LK shows the Redmi logo, the screen goes
+dark for ~2 s (our `con_clear` filling 10 MB with the MMU off looks like this), then
+the logo returns.
+
+**INCIDENT: recovery boot loop.** After the third boot attempt the phone cycles
+logo -> black -> logo forever. LK is being told to boot `recovery` on every reset (the
+`misc` BCB says `boot-recovery` and our shim cannot clear it: that needs eMMC writes we
+do not have yet), so the key combos never reach fastboot. Verified from the host:
+during the loop the phone exposes **no USB device at all** (`fastboot devices` empty
+for 90 s; only the Mac's own hub enumerated), so a command cannot be slipped in.
+Three-finger salute, 30 s Power, continuous Vol- and cold-boot-with-cable all failed to
+break it.
+
+Consequences to design out in the next shim:
+- **The shim must not reset into the same boot target.** Prefer a long hang, or reset
+  only after clearing the boot target, otherwise a failed boot becomes a loop that
+  costs the user the fastboot window.
+- The M2 image is one `fastboot flash recovery` away from being replaced, but that
+  needs fastboot once: battery drain or a battery disconnect is the way back.
+- Android's `boot` and `userdata` were never touched: the only modified partition is
+  `recovery`.
+
+**TEST #3 result and the loop are recorded; recovery path is being handled with the
+user.**
+
+**RECOVERY IN PROGRESS (back cover off, battery connector disconnected).** The user
+opened the phone and unplugged the battery connector; the loop restarts as soon as the
+connector is reconnected, which confirms that a battery insert is a real cold PON (the
+only kind of boot where MTK's preloader samples the keys at all: a WDT/exception reset
+skips `boot_mode_select`, which is why holding Vol- through the loop never helped).
+So the escape is: key held *before* the connector touches, USB unplugged. Reconnecting
+the connector is also a free power switch, so attempts cost nothing.
+
+Fallback prepared on the host (no device contact yet): `mtkclient` V2.1.4 in
+`research/mtk/venv` (Python 3.12 from Homebrew, `research/` is git-ignored), local
+`mfusepy` stub in `research/mtk/stubs` because macFUSE is not installed, and
+`mtkclient/config/brom_config.py` has an entry for **dacode 0x6768 (MT6768/MT6769),
+`mt6768_payload.bin`** - i.e. BROM is a supported route if the key never registers.
+That route would `printgpt` (read-only) first and then write **`recovery`** only.
+
+**BOOT LOOP RESOLVED (2026-10-24, ~21:27 local) - Android boots again.**
+The key-based escapes all failed for a reason we can now state precisely: `misc`
+contained `boot-recovery` at offset 0x0 (confirmed by reading it back), and LK obeys
+that before any key, so no combo could ever reach fastboot. The battery-insert/key
+theory in the paragraph above was wrong in its prediction - a cold PON does re-run the
+key scan, but it does not outrank the BCB. Corrected here so the next person does not
+repeat 6 failed key attempts.
+
+What worked, in order:
+1. `mtkclient` V2.1.4 (Python 3.12) reaches the **BROM** with Vol+ + Vol- held while
+   plugging USB, with the battery connector **disconnected**. It must already be
+   waiting *before* the cable goes in, otherwise the window closes ("Handshake failed,
+   retrying..." forever). One clean power cycle per attempt: a failed attempt leaves
+   the BROM dirty.
+2. The BROM presents **interface 0 = CDC ACM (0x02/0x02/0x01)** and **interface 1 =
+   CDC Data (0x0a)**. macOS binds `com.apple.driver.usb.cdc.acm` to interface 0, so
+   `claim_interface(0)` and every interface-recipient control transfer (GET/SET_LINE_CODING,
+   which kamakiri2 needs) fail with `Errno 13`. `claim_interface(1)` works; device-scoped
+   and bulk transfers work. **Root alone does not help**: what helps is libusb's
+   whole-device capture, i.e. `detach_kernel_driver()` called by a **root** process
+   (libusb 1.0.30 >= 1.0.25 supports it) right before the exploit. We only ever detach;
+   we must not hold a claim ourselves or the DA cannot re-enumerate at stage 2 (that is
+   exactly why the first attempt died after `DRAM setup passed`).
+3. Two macOS constraints bit us: (a) the elevated process **cannot read the project
+   tree** (TCC) - `getcwd` fails, so everything had to move to `/tmp/mtk/`; (b) a
+   background elevated command is killed when the launcher exits - the reliable form
+   is `perl -e 'fork; setpgrp; exec ...'` with stdio redirected into `/tmp`.
+4. With the release in place, the full chain ran: kamakiri2 payload -> DA stage 1 ->
+   `DRAM setup passed` -> stage 2 -> `DA SLA is disabled` -> eMMC `DP6DAB`, USER
+   `0xe8f800000` -> GPT printed (52 entries, matching `docs/lancelot-hardware.md` §4).
+5. `misc` (GPT: offset `0x4008000`, length `0x80000` = 512 KiB) was backed up to
+   `/tmp/misc-backup.bin`, **SHA-256
+   `5fba5384ac9e07fb5cdd87f1088bf06ad7a1d9251c09613249a74180cbe6d99e`**, then zeroed
+   and read back verified. Only 33 bytes were non-zero in the whole partition:
+   `boot-recovery` @0x0, 1 byte @0xa00, `-system0` @0x1004, 1 byte @0x8000, 5 bytes
+   @0x8080, 5 bytes @0x80c0 (`roms` @0x80c1). No user data; Android regenerates these.
+6. Power-on: **Android booted normally.** `boot` and `userdata` were never touched.
+
+Artifacts/paths (all `/tmp`, none in git): `/tmp/mtk/` (mtkclient + venv + stubs),
+`/tmp/mtk-root-run.py` (detach-only hook + printgpt), `/tmp/mtk-clear-misc.py`
+(backup -> zero -> verify, aborts before writing if the backup size mismatches),
+`/tmp/misc-backup.bin`, `/tmp/misc-verify.bin`, logs `/tmp/full4.log`,
+`/tmp/clear-misc.log`. The `kamakiri2.py` patches live in the git-ignored copy under
+`research/mtk/mtkclient/` and `/tmp/mtk/mtkclient/` (GPLv3, local use only).
+
+**Design rule for the shim, now proven by a real incident: never reset back into the
+boot target you were loaded from.** Either hang, or clear the BCB first (needs the
+MSDC driver of M4).
+
+**Cause of the loop, confirmed by the user (2026-10-25).** The BCB did not appear by
+itself: the user had run **`adb reboot recovery`** from Android while `recovery` held
+the M2 shim. That command writes `boot-recovery` into `misc`; LK then obeys it on
+every reset, so the phone never sampled Volume- again. Consequences worth keeping:
+- Never `adb reboot recovery` / `fastboot reboot recovery` while `recovery` holds a
+  non-recovery payload. The safe door to the bootloader is `adb reboot bootloader`.
+- The M2 shim made it worse by resetting into the same target. That is fixed below.
+
+**M2.1 instrument (2026-10-25, image `1a91985e`) - built, not yet flashed.** TEST #2
+and #3 both ended in a ~2 s reset, and the CNTFRQ fallback did not explain it, so the
+next image stops guessing and becomes an instrument:
+
+- **Stage bands instead of timing.** A full-width colour band is drawn after each
+  stage completes: S1 red = fb written, S2 orange = WDT stopped *and read back*,
+  S3 yellow = CNTPCT sampled twice, S4 green = FDT parsed, S5 cyan = GICD read,
+  S6 blue = GICR0 read, S7 black = probe end. The stack is persistent state, so the
+  result is readable **without a working timer** (the timer is under test, not a
+  tool), and the first missing band names the stage that failed.
+- **Never reset.** Both the normal end and the exception path now end in `wfe`
+  forever; the panic screen is magenta with ESR/ELR/FAR and a re-entrancy guard. A
+  failed boot can no longer become a loop, which is the design rule above, enforced.
+- **The white background is the execution proof.** `con_clear(WHITE)` is the first
+  thing touched: a white panel means our code ran and FB_BASE is right. The old
+  build cleared to `0xff101010`, indistinguishable from the black of a dead DSI.
+- **The WDT stop is verified** (`WDT_MODE` read back with bit 0 clear) and the verdict
+  is on screen as "STILL ARMED" if the key is silently dropped - that is the other
+  candidate for the 2 s reset.
+- **Only redistributor 0** is read; reading a powered-down one can wedge the MTK
+  interconnect, and there is still no way back from a wedged bus.
+- Bands are 64 px at `FB_H - 460`, the text tops out near 1800 px, no overlap.
+
+Image: `shim/out/shim-boot-lancelot.img`, 131 072 bytes, SHA-256
+`1a91985e6a0f5e5aca5679436308332efdf45e39dafcfad8fa962d95d5e6412b`.
+
+**TEST #5 (2026-10-25, `1a91985e`): black screen, reboot after ~2 s.** Unchanged from
+TEST #2 and #3, and now decisive: the first instruction of `shim_main` fills the panel
+**white**, and every failure path (fault, panic, normal end) ends in `wfe` and never
+resets. A black screen plus a reset therefore means the shim is **not being executed
+at all** - the old "CNTFRQ makes the hold instant" theory is dead, and so is the
+"display problem" theory.
+
+**Root cause found (2026-10-25): the boot image cmdline.** Comparing our image with
+`backup/lancelot-lineage/recovery.img` field by field, everything matched (header v2,
+2048-byte pages, kernel `0x40080000`, ramdisk `0x47c80000`, tags = dtb `0x4bc80000`,
+DTB byte-identical, gzip kernel in both) except the cmdline: the working image says
+`bootopt=64S3,32N2,64N2 androidboot.serialconsole=0`, ours said `console=null`.
+
+`bootopt` is **an LK directive, not a kernel one**. In MediaTek LK
+`platform/common/boot/boot_opt.c` the global `g_is_64bit_kernel` is initialised to
+**0** and set to 1 only when the parser finds the final `64` of
+`bootopt=64S3,32N2,64N2` (it reads two characters at offset 0x12 of `bootopt=`).
+Missing or unparsable bootopt leaves the **32-bit** default, and `mt_boot.c` then takes
+the AArch32 handoff instead of `lk_jump64()` -> `jumparch64_smc()`. Our 64-bit payload
+would be decoded as AArch32: instant fault, then the watchdog resets the phone. That
+fits every observation, including "nothing ever appears on screen".
+- Sources: <https://raw.githubusercontent.com/moto-penangf/lk-mt6765/main/lk/platform/common/boot/boot_opt.c>,
+  <https://raw.githubusercontent.com/dguidipc/gemini-lk/master/lk/app/mt_boot/mt_boot.c>,
+  and the bootopt element meaning in <https://gitlab.com/mt6735-mainline/bootshim/-/raw/master/README.md>.
+- LineageOS MT6768 uses the same three-element string and
+  `BOARD_INCLUDE_RECOVERY_DTBO := true`, so both fields belong in our image.
+
+**M2.2 (2026-10-25, image `900083f6`): the working image's geometry, our payload.**
+`shim/build.sh` now passes the LineageOS cmdline verbatim and, when
+`dtb/lancelot-boot/recovery_dtbo.img` exists (extracted from that same recovery.img,
+DTBO magic `0xd7b7ab1e`, 131 072 bytes, git-ignored like the rest of `dtb/`), adds
+`--recovery_dtbo`. Verified against the reference image: every header field identical
+except `recovery_dtbo_offset`, which is computed per-image (`0x2800` here because
+kernel+ramdisk are small, `0x1b63800` there) and is correct in both.
+
+Image: 262 144 bytes, SHA-256
+`900083f68b99dec7d0703597021dbe57bafc4fa1a7d5b3f34b1ff8b0e48d9a87`, flashed into
+`recovery`. Restore of the LineageOS recovery (`61b4b257...0355`) still pending:
+`recovery` is the test slot and `misc` is clean, so a hang costs only a 15 s Power
+hold.
+
+**TEST #6 result (2026-10-25, image `900083f6`): the payload runs.** The `bootopt`
+theory was right - LK now hands us over in AArch64. The screen came up **white with
+the text on it**, which also settles three display questions at once:
+
+1. The panel **keeps scanning our writes after LK**, with no refresh kick. The
+   command-mode worry is dead: the display pipeline keeps running.
+2. **Pixel format is 32 bpp `0xAARRGGBB`** (white and yellow both came out as such).
+3. **The buffer is the panel image rotated 90 degrees clockwise.** The evidence: the
+   text, drawn at screen `x = 24..960`, `y = 24..750`, appeared at `x = 1007..1055`
+   (the right edge) and the seven stage bands, drawn at `y = 1880..2308`, were not
+   visible at all. Both are explained by `screen (x, y) -> buffer (row = 1079 - x,
+   column = y)`: the buffer is landscape (2340 px per line, 1080 lines, stride
+   2340 px), the panel scans it rotated. Under that map the bands land at
+   `x_screen = 1079 - 1880 = -801`, i.e. off the left edge. Recorded with its evidence
+   in `docs/lancelot-hardware.md` §6.
+
+**M2.3 (2026-10-25, image `c3588ffa`): console in screen coordinates.**
+`shim/console.c` now draws in screen pixels and owns the rotation (`FB_ROT` in
+`shim/board.h`), so the rest of the shim - and later XNU's framebuffer hook - works in
+"what the user sees". Changes: white frame around the screen (all four sides visible
+= geometry right), black background with white/yellow text (the yellow-on-white of
+TEST #6 was the legibility complaint), font scale 4, bands stacked **from the bottom
+upwards** so band 0 (red) is the lowest, and two long rows shortened so nothing runs
+past the right border. `shim/out/render-lancelot.png` is a host render of the exact
+layout through the measured mapping; it was checked before flashing.
+
+Image: 262 144 bytes, SHA-256
+`c3588ffa5f1ef41a7383032fa06ada651a133bcd86c5a680fec9a72fbaca15ac`, flashed into
+`recovery` and verified (`Sending 256 KB` / `Writing OKAY`). Header re-checked: kernel
+at `0x40080000`, tags `0x4bc80000`, 2048-byte pages, header v2, gzip round-trip
+identical to `out/Image`.
+
+**TEST #7 (2026-10-25, image `c3588ffa`): the rotation model is WRONG.** Reported:
+the empty area at the top is still there and the text is now a jumble - only an
+"ammasso di cose". Painting through the 90-degree landscape map therefore shears the
+content, which is what a wrong pitch does, so the two observations in TEST #6 cannot
+both be explained by that model. Guessing again is not an option (rule: two
+consecutive failures on the same model -> re-analyse, do not retry), so the geometry
+is now measured instead of assumed.
+
+**M2.4 geometry probe (`shim/geom.c`, `PROBE=geom`, image `7b493651`):** paints the
+raw buffer as a function of *byte offset* with no coordinate maths at all - the first
+10,108,800 bytes (exactly one 1080x2340 frame, either orientation) in four colour
+quarters with huge digits 1-4, everything after that up to `vramSize` in magenta, plus
+white edges on the first buffer row and on the left of each quarter. Four horizontal
+bands with upright digits = the old portrait map was right; vertical bands = landscape;
+shear = pitch; a magenta band = the frame does not start at `FB_BASE`. Nothing is
+written outside the display carve-out, and the probe never resets.
+
+**TEST #8 / photo evidence (2026-10-25).** The user photographed TEST #7's screen and the
+picture is unambiguous: dense horizontal aliasing plus vertical colour stripes - the
+classic signature of a **wrong pitch**, here 2.17x off. It also shows the top ~470 px
+of the panel are **LK's splash layer** (the bootloader-unlocked padlock), not our
+buffer, which is what the "empty space above" has been in every test since #5.
+
+The host render then killed the transpose model outright: if the buffer line were
+1080 px, a 2340-px screen column could not exist, and the drawing would wrap onto
+itself - which is exactly the repetition the render shows. A DMA reads contiguous
+lines, so there is no 90-degree anything: the frame is scanned normally and only the
+**pitch** is unknown.
+
+So the next boot measures the pitch instead of guessing it: `shim/geom.c` paints four
+equal **byte** quarters of the display buffer (red/green/blue/yellow with digits 1-4,
+exactly one 1080x2340 frame = 10,108,800 bytes) and the rest of `vramSize` magenta.
+Where those boundaries land on the panel gives the pitch directly, because they are at
+known byte offsets: 2,527,200 / 5,054,400 / 7,581,600.
+
+**TEST #9 and #10 (2026-10-25, photos of the geometry probe): geometry measured.**
+#9's four byte quarters came out as four clean horizontal bands with exactly the
+585-row spacing a **1080-px pitch** predicts, so the pitch is **4320 bytes** and the
+TEST #6 "rotation" was that aliasing read the other way. #10 added white rules at
+buffer columns 0 and 540: they landed 525-540 px apart (scale 1:1) but at panel
+x ~265 and ~790, a constant shift: the scanout starts **1024 bytes into each line**,
+so panel column `x` shows buffer column `x + 256` and the last 256 px of the panel
+show the start of the next buffer row. Content must stay left of
+`FB_W - FB_XOFF`. The top ~500 px are LK's splash layer in every photo.
+
+**M2.5 / TEST #11 (2026-10-25, image `fcbe3488`): the console works.** Text is
+upright, readable and flush with a drawn frame, which validates all four measured
+constants at once (pitch 4320, no rotation, 256-px scanout offset, 520-px top
+strip). What the screen reported:
+
+- `FBBASE 000000007E605000`, `STRIDE 00000000000010E0` (4320), `FBARG lo=7E605000
+  hi=00000000` - LK's live base equals the DTBO value, so the placeholder was right.
+- `VRAM 00000000017E8000` (25.0 MiB) as documented.
+- `S2 WD stopped`, `WDT b=0000005D a=0000005C`: **the watchdog disable works**, which
+  is why no boot since #6 has reset on its own.
+- `S3 TMR f=00C65D40 d=000F6101`: CNTFRQ is 13 MHz at runtime and the counter runs;
+  the 200k-iteration loop is ~78 ms, so the old `sleep_ms` bug is fully understood.
+- `S4 FDT parsed`, `FDT 000000004BC80000`: the live FDT is where LK puts it.
+- `MEM0 lo=40000000 hi=00000000`, `size lo=00000000 hi=00000001`: **one 4 GiB bank
+  at 0x40000000**, crossing the 4 GiB boundary - the normal MTK 4 GB layout. The two
+  `hi` digits are the only values the photo leaves slightly ambiguous.
+- `GICD c=00000012 t=0079040F`, `GICR a=00000000 w=00000000`: GICv3 with affinity
+  routing, 512 SPIs, our redistributor awake.
+
+The seven stage bands did not appear below the text; every stage line printed
+instead (through `S7 DONE`), so they are redundant and will be dropped.
+
+**M2 is done.** The phone runs our own AArch64 payload, halts the watchdog, reads the
+live FDT and draws a console at a measured address, pitch and offset. That is the
+whole output path the kernel will need in M3, and the DRAM map is now a measured fact
+rather than a DTB guess.
+
+**Next:** M3 - `BOARD_LANCELOT` in the XNU config (`xnu/config/`), an ADT from
+`tools/mkadt.py --board lancelot` carrying the measured memory map, GICv3 at
+`0x0c000000`, CNTFRQ 13 MHz and `cpus=1`, then the first kernel boot with the console
+wired to this framebuffer mapping.
 
 ## Agent handoff / active work (2026-10-15, latest)
 

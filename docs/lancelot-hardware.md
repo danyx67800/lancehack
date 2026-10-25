@@ -53,7 +53,8 @@ directly and ignore sysirq unless an interrupt turns out to be mis-typed.
 | --- | --- | --- | --- |
 | Installed RAM | **4 GB** | user (2026-10-24) | CONFIRMED by owner |
 | `memory` node in the shipped DTB | `reg = <0x0 0x40000000 0x0 0x3e605000>` (~997 MiB) | `boot.img` DTB | CONFIRMED as DTB content — **LK patches this at boot**, so it is not the installed size |
-| Real DRAM map | — | — | UNKNOWN until the shim prints the live `/memory` (M2). On 3 GiB units LK reports `0x40000000`+`0xc0000000`; a 4 GiB unit should add a bank above 4 GiB |
+| Real DRAM map (live FDT) | **one bank, base `0x40000000`, size `0x1_00000000` (4 GiB)**, i.e. the range crosses the 4 GiB boundary up to `0x1_40000000` - the normal MTK 4 GB layout, since the first GiB of address space belongs to peripherals | MEASURED on the phone, TEST #11 (`MEM0`/`size` on screen). Re-read `size` on the next instrument boot: the two `hi` digits are the only ones the photo leaves ambiguous |
+| DRAM SKU | 4 GB (one bank, no second bank above 4 GiB) | MEASURED, TEST #11 |
 | LK FDT address | `0x4bc80000` (= `BOARD_KERNEL_BASE + BOARD_DTB_OFFSET`, same as the tags address) | `boot.img` header: `tags_addr`/`dtb_addr` = `0x4bc80000` | CONFIRMED |
 | Android kernel load | `0x40080000` | header (`--base 0x40078000`, `--kernel_offset 0x8000`) | CONFIRMED |
 | Android ramdisk load | `0x47c80000` | header | CONFIRMED |
@@ -165,9 +166,18 @@ kernel code (M4).
 | Bootloader framebuffer | base **`0x7e605000`** (`fb_base_l` = 0x7e605000, `fb_base_h` = 0), inside the `0x7dcb0000`+34 MiB carve-out | DTBO atag values; LK FDT | CONFIRMED |
 | VRAM size | `0x017e8000` (25.0 MiB) | DTBO `atag,videolfb-vramSize` | CONFIRMED |
 | Panel fps tag | `0x1770` = 6000 (60.00 Hz) | DTBO | CONFIRMED |
-| LCM inited at LK | `islcmfound = 1`, `islcm_inited = 0` | DTBO | CONFIRMED |
-| Pixel format / stride | — | — | UNKNOWN — derive from `vramSize` and geometry at M2, do not assume `w*4` |
-| Continuous scanout after LK | — | — | UNKNOWN. Command-mode DSI usually needs a refresh kick; M2 decides |
+| LCM inited at LK | `islcmfound = 1`, `islcm_inited = 0` - yet the panel scans continuously after LK hands over | DTBO; MEASURED, TEST #11 |
+| Live fb base from LK | `atag,videolfb-fb_base_l = 0x7e605000` at runtime, `hi = 0` - identical to the DTBO value, so the DTBO placeholder is authoritative here | Live FDT via the shim, TEST #11 |
+| Watchdog register | `TOPRGU_WDT_MODE` reads `0x5D` before the shim touches it and `0x5C` after clearing bit 0: the shim's disable **works on this SoC** | MEASURED, TEST #11 |
+| System counter | `CNTFRQ_EL0 = 0x00C65D40` = **13 MHz** at runtime (the DT value was right); 200k loop iterations advanced `CNTPCT` by ~1.0M ticks (~78 ms) | MEASURED, TEST #11 |
+| GIC registers as found | `GICD_CTLR = 0x12` (enable + affinity routing), `GICD_TYPER = 0x0079040F` (512 SPIs), `GICR_WAKER = 0` (core awake) | MEASURED, TEST #11 |
+| Pixel format | 32 bpp, `0xAARRGGBB`, byte-identical to the shim's colour constants | MEASURED on the phone, TEST #6 (white and yellow came out as white and yellow) |
+| Buffer pitch (stride) | **4320 bytes (1080 px)**, no padding. The four equal byte quarters of the geometry probe came out as clean horizontal bands with the exact 585-row spacing a 1080-px pitch predicts | MEASURED on the phone, TEST #9 (photo); TEST #10 confirmed the 1:1 scale with two rules 540 px apart |
+| Scanout rotation | **none**: the frame is scanned as contiguous lines. The TEST #6 "text on the right edge" reading was the horizontal offset below, seen through a wrong pitch | DISPROVED, TEST #7 (photo) and TEST #11 (text upright and aligned) |
+| Scanout horizontal offset | the panel shows **column `x + 256`** of each line for panel column `x`: the scanout starts 1024 B into the line, so the last 256 px of the panel show the *start of the next buffer row*. Rules at buffer columns 0 and 540 landed at panel x ~265 and ~790. Confirmed by the console: a frame drawn at `x = 8` is flush with the panel's left edge and text does not wrap | MEASURED on the phone, TEST #10 (photo) + TEST #11 |
+| Top strip of the panel | the first ~500 px show LK's own splash layer (the bootloader-unlocked padlock), not our buffer; the console starts at buffer row 540 and is fully visible | MEASURED on the phone, TEST #7 and #11 (photos) |
+| Pixel format | 32 bpp `0xAARRGGBB` | CONFIRMED, TEST #6/#9 (every colour constant renders as intended) |
+| Continuous scanout after LK | **yes**, the panel keeps refreshing our writes without any kick | MEASURED on the phone, TEST #5/#6: buffers written after LK took effect immediately |
 | MMSYS mutex | `0x14016000`, size `0x1000` | DTB | CONFIRMED |
 | DSI0 | `0x14014000`, size `0x1000`, IRQ SPI 238 | DTB | CONFIRMED |
 | OVL0_2L | `0x1400c000`, size `0x1000`, IRQ SPI 242 | DTB | CONFIRMED |
