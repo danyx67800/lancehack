@@ -549,7 +549,8 @@ and the framebuffer block work and anything after that is `arm_init`'s own probl
 `a9ff9cc833ce42150a6c8d6c95bd08108751465619bb23625576a872cc3bdce7`, entry
 `0xfffffe000747f488`. Image `shim/out/shim-boot-lancelot.img` **16 660 480 bytes**,
 SHA-256 `9f40f3699d1a75db7f0bde6e1c64c4a9b504cbd3d76a3c50947c15e116a4f809`, ramdisk
-identical to the payload (10 segments, ADT `0xa016`).
+identical to the payload (10 segments, ADT `0xa016`). Flashed
+(`Sending 16270 KB / Writing OKAY`), waiting for the observation.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
