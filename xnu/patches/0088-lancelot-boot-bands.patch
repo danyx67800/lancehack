@@ -1,0 +1,136 @@
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -35,6 +35,30 @@
+ #include "assym.s"
+ #include <arm64/tunables/tunables.s>
+ #include <arm64/exception_asm.h>
++
++#if defined(SWEET) || defined(LANCELOT)
++/*
++ * One 64x32 colour slot on the stage-0 row, for probing how far the kernel
++ * gets before the bootstrap text console is trusted. Slot 0 is the white band
++ * start_first_cpu draws; slots 1..11 follow it to the right.
++ */
++.macro SWEET_BAND slot, colour
++	MOV64	x0, BOARD_FB_STAGE0_ADDR
++	add		x0, x0, #(64 * \slot)
++	MOV64	x1, \colour
++	mov		x2, #32
++	MOV64	x4, BOARD_FB_STRIDE
++7:	mov		x3, #64
++	mov		x5, x0
++8:	str		w1, [x5], #4
++	subs	x3, x3, #1
++	b.ne	8b
++	add		x0, x0, x4
++	subs	x2, x2, #1
++	b.ne	7b
++	dsb		sy
++.endm
++#endif
+ 
+ #if __ARM_KERNEL_PROTECT__
+ #include <arm/pmap.h>
+@@ -841,25 +865,11 @@
+ 
+ #if defined(SWEET) || defined(LANCELOT)
+ 	/*
+-	 * Stage 0b: blue 64x32 band right of the white one, the first store made
+-	 * through the MMU. White without blue means the kernel died turning the
+-	 * translation on, or the bootstrap mapping of the framebuffer block is
+-	 * wrong; either way nothing later can be blamed yet.
++	 * Stage 0b: the first store made through the MMU. White without blue means
++	 * the kernel died turning the translation on, or the bootstrap mapping of
++	 * the framebuffer block is wrong; nothing later can be blamed yet.
+ 	 */
+-	MOV64	x0, BOARD_FB_STAGE0_ADDR
+-	add		x0, x0, #256				// 64 pixels right of the white band
+-	MOV64	x1, 0xff0000ff				// opaque blue
+-	mov		x2, #32
+-	MOV64	x4, BOARD_FB_STRIDE
+-1:	mov		x3, #64
+-	mov		x5, x0
+-2:	str		w1, [x5], #4
+-	subs	x3, x3, #1
+-	b.ne	2b
+-	add		x0, x0, x4
+-	subs	x2, x2, #1
+-	b.ne	1b
+-	dsb		sy
++	SWEET_BAND 1, 0xff0000ff			// blue
+ #endif
+ 
+ #if !VMAPPLE && !defined(SWEET) && !defined(LANCELOT)
+@@ -904,6 +914,10 @@
+ 	msr		CPU_OVRD, x9
+ #endif
+ 
++#if defined(SWEET) || defined(LANCELOT)
++	SWEET_BAND 2, 0xff00ff00			// green: CPACR/TPIDR/MIDR survived
++#endif
++
+ 	// If x21 != 0, we're doing a warm reset, so we need to trampoline to the kernel pmap.
+ 	cbnz	x21, Ltrampoline
+ 
+@@ -924,6 +938,10 @@
+ 	mov	lr, x21
+ #endif
+ 
++#if defined(SWEET) || defined(LANCELOT)
++	SWEET_BAND 3, 0xffffff00			// yellow: about to return into arm_init
++#endif
++
+ 	// Return to arm_init()
+ 	ret
+ 
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -8,6 +8,9 @@
+ 
+ #if defined(SWEET) || defined(LANCELOT)
+ void sweet_early_mark(unsigned int stage, const char *label);
++/* A bare 64x32 colour slot on the stage row, for C code that runs before the
++ * text console is trusted. Slot 0 is the band start.s draws white. */
++void sweet_early_band(unsigned int slot, uint32_t colour);
+ void sweet_early_putc(char c);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -93,6 +93,22 @@
+ }
+ 
+ void
++sweet_early_band(unsigned int slot, uint32_t colour)
++{
++	volatile uint32_t *base = EARLY_FB + EARLY_YTOP * EARLY_STRIDE + EARLY_XOFF + slot * 64;
++
++	if (early_disabled || slot > 11) {
++		return;
++	}
++	for (unsigned int y = 0; y < 32; y++) {
++		for (unsigned int x = 0; x < 64; x++) {
++			base[y * EARLY_STRIDE + x] = colour;
++		}
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
++void
+ sweet_early_mark(unsigned int stage, const char *label)
+ {
+ 	if (early_disabled || stage > 20) {
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -347,6 +347,7 @@
+ 	DTEntry chosen = NULL;
+ 	unsigned int dt_entry_size = 0;
+ 
++	sweet_early_band(4, 0xff00ffff);		/* cyan: C entry and stack work */
+ 	sweet_early_mark(1, "arm_init entered (MMU on)");
+ 
+ 	arm_setup_pre_sign();
