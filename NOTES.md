@@ -459,6 +459,18 @@ boots Android on this board, so the shim has to be reached with **Vol+ + Power**
 a powered-off phone; that key boot writes no BCB, which is why it is preferred to
 `adb reboot recovery` (the route that caused the earlier loop).
 
+**TEST #12 result: the loader refused the ramdisk.** On screen, after the probe page:
+`ramdisk overlaps kernel memory`. That message is `shim/loader.c`'s guard, inherited
+from sweet, which compared the ramdisk with `[phys_base, phys_base + mem_size)` - the
+whole DRAM the kernel will manage - so it always fired here: LK loads the ramdisk at
+`0x47c80000`, inside that window. Nothing was copied and the kernel never ran.
+
+Fixed in `edc61f9`: the guard now covers what the loader actually writes (segments,
+ADT and `boot_args`, i.e. `0x41004000`-`0x420852b0` here) and prints `DST lo/hi` on
+the probe page. Rebuilt image `2f98a2a921bae8e20898495332feb015e73549ef52e95df88cf10f7c171776c9`
+flashed to `recovery` with the user's confirmation; `fastboot reboot` lands in Android
+again, so the shim needs **Vol+ + Power** from a powered-off phone.
+
 **Next, in this order:**
 
 1. Platform expert: `0016-sweet-device-tree-platform-expert` matches `xiaomi,sweet`
