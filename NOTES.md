@@ -550,7 +550,36 @@ and the framebuffer block work and anything after that is `arm_init`'s own probl
 `0xfffffe000747f488`. Image `shim/out/shim-boot-lancelot.img` **16 660 480 bytes**,
 SHA-256 `9f40f3699d1a75db7f0bde6e1c64c4a9b504cbd3d76a3c50947c15e116a4f809`, ramdisk
 identical to the payload (10 segments, ADT `0xa016`). Flashed
-(`Sending 16270 KB / Writing OKAY`), waiting for the observation.
+(`Sending 16270 KB / Writing OKAY`).
+
+**TEST #14 result: white + blue, still no text.** The aligned block fixed the mapping -
+the blue band is the first store made *through* the MMU and it is on the panel - so the
+translation, the framebuffer block and the code path up to `SCTLR_EL1` are all good. What
+is left between that store and `sweet_early_mark(1)` is a handful of instructions (CPACR,
+TPIDR, MIDR, `APPLY_TUNABLES` which is empty for these boards, `cbnz x21`, the boot-args
+KVA computation and the `ret` into `arm_init`), and a photo cannot tell those apart.
+
+**Patch `0088` (commit `837d60c`) bands the window.** `SWEET_BAND slot, colour` paints one
+64x32 slot on the stage-0 row; the stage row is now a read-out:
+
+| slot | colour | means |
+| --- | --- | --- |
+| 0 | white | `start_first_cpu` entered (pre-MMU) |
+| 1 | blue | first store through the MMU |
+| 2 | green | CPACR/TPIDR/MIDR survived |
+| 3 | yellow | about to return into `arm_init` |
+| 4 | cyan | `arm_init` entered, C stack works (`sweet_early_band`) |
+
+Anything below the row is the bootstrap text console, so cyan + no text narrows the next
+step to the console itself.
+
+**TEST #15 prepared (2026-10-25).** CI run `40193380496` green:
+`kernel.development.lancelot` SHA-256
+`129f4f84c2606fbd9b846f792cb11a9675f95f7064420d4bc1bd213866d41ef1`, entry
+`0xfffffe000747f488`. Image `shim/out/shim-boot-lancelot.img`, 16 660 480 bytes,
+SHA-256 `4937639b7474b14bf163cb12b21e6f43b9b22efb10238a6a2ae5b2afbd5cd3b5`, ramdisk
+identical to the payload (10 segments, ADT `0xa016`). Flashed
+(`Sending 16270 KB / Writing OKAY`).
 
 ## Agent handoff / active work (2026-10-15, latest)
 
