@@ -2,12 +2,63 @@
 """Build the minimal Apple Device Tree that the SWEET xnu needs to boot.
 
 Only what the early boot path actually reads (see NOTES.md); every MMIO
-address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem]
+address comes from the live FDT of the board, or was measured on it (see
+docs/lancelot-hardware.md).
+
+Usage:  mkadt.py OUT.adt [--board sweet|lancelot] [--dump] [--qemu] [--highmem]
+                 [--seed HEX]
 """
 import hashlib, os, struct, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import adt  # noqa: E402
+
+# Per-board hardware description. Everything here comes from the shipped DTB of
+# that phone or was measured on it; the source of each lancelot value is in
+# docs/lancelot-hardware.md.
+BOARDS = {
+    'sweet': dict(
+        # Kernel-managed RAM: above every Qualcomm XPU carve-out (see NOTES.md)
+        phys_base=0xb0000000, mem_size=0x4d000000,
+        soc_base=0x01000000,
+        gicd=(0x17a00000, 0x10000), gicr=(0x17a60000, 0x100000),
+        timebase=19200000, vtimer_intid=19,
+        fb=(0x9c000000, 0x1700000), fb_w=1080, fb_h=2400, fb_stride=1080 * 4,
+        cpu_compat=('qcom,kryo470', 'ARM,v8'),
+        clocks=(1804800000, 2304000000), cluster_split=6, cores=8,
+        model_compat=('xiaomi,sweet', 'qcom,sm7150'),
+        ecid=0x5357454554000001,  # 'SWEET' + 1, synthetic
+        ufs=(0x01d84000, 0x3000),
+        display_scale=3,
+    ),
+    'lancelot': dict(
+        # Measured, TEST #11: one 4 GiB bank at 0x40000000, crossing the 4 GiB
+        # boundary. The first kernel boot only takes the part below the display
+        # carve-out (0x7dcb0000), which LK keeps for the splash and our console:
+        # 0x40000000 + 0x3dcb0000 = 988 MiB. Growing into the carve-outs is a
+        # later, per-region decision (docs/PORTING.md).
+        phys_base=0x40000000, mem_size=0x3dcb0000,
+        # arm-io is relative to this; MTK peripherals span 0x0c000000-0x11xxxxxx,
+        # so the GIC (0x0c000000) sits at offset 0 and nothing goes negative.
+        soc_base=0x0c000000,
+        # GICv3: dist 0x0c000000 +0x40000, redist 0x0c040000 +0x200000 (DTB).
+        gicd=(0x0c000000, 0x40000), gicr=(0x0c040000, 0x200000),
+        # 13 MHz from CNTFRQ_EL0 on the phone (TEST #11); PPI 27 is the GICv3
+        # virtual timer, which is what XNU arms.
+        timebase=13000000, vtimer_intid=27,
+        fb=(0x7e605000, 0x017e8000), fb_w=1080, fb_h=2340, fb_stride=4320,
+        cpu_compat=('mediatek,mt6768', 'ARM,v8'),
+        clocks=(1800000000, 2000000000), cluster_split=6, cores=8,
+        model_compat=('xiaomi,lancelot', 'mediatek,mt6768'),
+        io_name='lancelot-io',
+        display_compat='lancelot,display',
+        ecid=0x4c414e43454c4f54,  # 'LANCELOT', synthetic
+        ufs=None,                 # eMMC/MSDC0 at 0x11230000, driver lands in M4
+        display_scale=3,
+        # Measured scanout quirks (docs/lancelot-hardware.md §6).
+        scanout_xoff=256, scanout_ytop=520,
+    ),
+}
 
 # Kernel-managed RAM: above every Qualcomm XPU carve-out (see NOTES.md)
 PHYS_BASE = 0xb0000000
@@ -74,13 +125,20 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False):
+def build(seed=None, qemu=False, highmem=False, board='sweet'):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
-    phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
+    bp = BOARDS[board]
+    phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (bp['phys_base'], bp['mem_size'])
     # Carve the panic log off the top so the kernel never allocates over it.
     panic_base = phys_base + mem_size - PANIC_LOG_SIZE
     mem_size -= PANIC_LOG_SIZE
-    gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (GICD, GICR, TIMEBASE)
+    soc_base = bp['soc_base']
+    gicd, gicd_size = bp['gicd']
+    gicr, gicr_size = bp['gicr']
+    timebase, vtimer_intid = bp['timebase'], bp['vtimer_intid']
+    if qemu:
+        gicd, gicd_size, gicr, gicr_size = QEMU_GICD, 0x10000, QEMU_GICR, 0x100000
+        timebase, vtimer_intid = QEMU_TIMEBASE, QEMU_VTIMER_INTID
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
     ph = lambda: ('AAPL,phandle', u32(next(phandle)))
@@ -105,13 +163,13 @@ def build(seed=None, qemu=False, highmem=False):
         # from /chosen, the pixel size from IOMobileFramebuffer. Scale 0 makes
         # SpringBoard's FBSDisplayMode "infxinf@0x" invalid. 1080x2400 @3x =
         # 360x800 points (like iPhone X class devices).
-        ('display-scale', u32(3)),
+        ('display-scale', u32(bp['display_scale'])),
         # XNU derives IOPlatformUUID (gethostuuid) from these on arm; without
         # them CFPreferences cannot use kCFPreferencesCurrentHost (no ByHost
         # files), so e.g. DataMigration never records LastSystemVersion and
         # migrates on every boot. Synthetic ECID (not the phone's); chip-id
         # of the A11 that the iPhone X userland expects.
-        ('unique-chip-id', struct.pack('<Q', SWEET_ECID)),
+        ('unique-chip-id', struct.pack('<Q', bp['ecid'])),
         ('chip-id', u32(0x8015)),
         # Security status as on a dev-fused, undemoted board (tuple 0,0,1,1):
         # MobileGestalt reads these from /chosen, and mobileactivationd's
@@ -129,16 +187,21 @@ def build(seed=None, qemu=False, highmem=False):
         # with CSR_ALLOW_UNRESTRICTED_FS (vm_unix.c shared region checks).
         node('asmb', [ph(), ('lp-sip0', u64(0x6f)), ('lp-sip1', u32(1))])])
 
-    # SWEET SMP: all eight cores in physical-core order (0-5 Cortex-A55,
-    # 6-7 Cortex-A76), one homogeneous cluster. The kernel defaults to one
-    # and uses cpus=N to select an initial prefix (N <= 8).
-    # QEMU retains its original single-CPU tree: its MPIDRs differ from sweet.
+    # SMP: all eight cores in physical-core order (0-5 little, 6-7 big), one
+    # homogeneous cluster. The kernel defaults to one and uses cpus=N to select
+    # an initial prefix (N <= 8).
+    # QEMU retains its original single-CPU tree: its MPIDRs differ.
+    # NOTE for lancelot: reg here is core << 8, i.e. one core per cluster. That
+    # is what sweet's DTB implies, but MTK MT6768 puts the two Cortex-A75 in
+    # affinity 1 (MPIDR 0x100/0x101) and the six A55 in affinity 0 (0x000-0x005).
+    # The real values must be read from the live FDT /cpus before the first SMP
+    # boot; M3 boots with cpus=1, which uses cpu0 only.
     cpu_nodes = []
-    for core in range(1 if qemu else 8):
+    for core in range(1 if qemu else bp['cores']):
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
-            ('compatible', cstr('qcom,kryo470') + cstr('ARM,v8')),
+            ('compatible', b''.join(cstr(c) for c in bp['cpu_compat'])),
             ('reg', u32(core << 8)),  # actual MPIDR Aff1:Aff0, NOT logical ID
             ('cpu-id', u32(core)),   # descriptive: XNU assigns IDs by DT order
             ('cluster-id', u32(0)),  # descriptive; see ml_parse_cpu_topology
@@ -149,7 +212,7 @@ def build(seed=None, qemu=False, highmem=False):
             ('l3-cache-id', u32(0)),     # shared L3
             ('state', cstr('running' if core == 0 else 'stopped')),
             ('timebase-frequency', u32(timebase)),
-            ('clock-frequency', u32(2304000000 if core >= 6 else 1804800000)),
+            ('clock-frequency', u32(bp['clocks'][1] if core >= bp['cluster_split'] else bp['clocks'][0])),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(1866000000)),
             ('peripheral-frequency', u32(timebase)),
@@ -162,16 +225,16 @@ def build(seed=None, qemu=False, highmem=False):
         ph(),
         ('compatible', cstr('arm,gic-v3')),
         ('interrupt-controller', b''),
-        ('virtual-timer-intid', u32(QEMU_VTIMER_INTID if qemu else VTIMER_INTID)),
-        ('reg', u64(gicd - SOC_BASE, GICD_SIZE, gicr - SOC_BASE, GICR_SIZE)),
+        ('virtual-timer-intid', u32(vtimer_intid)),
+        ('reg', u64(gicd - soc_base, gicd_size, gicr - soc_base, gicr_size)),
     ])
     arm_io = node('arm-io', [
         ph(),
-        ('device_type', cstr('sweet-io')),
-        ('compatible', cstr('sweet-io') + cstr('arm-io')),
+        ('device_type', cstr(bp.get('io_name', 'sweet-io'))),
+        ('compatible', cstr(bp.get('io_name', 'sweet-io')) + cstr('arm-io')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-        ('ranges', u64(0, SOC_BASE, 0x100000000 - SOC_BASE)),
+        ('ranges', u64(0, soc_base, 0x100000000 - soc_base)),
     ], [gic,
         # No hardware: watchdogd checks IODeviceTree:/arm-io/wdt for no-pmu and
         # otherwise crashes trying to set the PMU boot stage (customer builds
@@ -184,25 +247,37 @@ def build(seed=None, qemu=False, highmem=False):
         node('disp0', [
             ph(),
             ('device_type', cstr('display-subsystem')),
-            ('compatible', cstr('sweet,display')),
+            ('compatible', cstr(bp.get('display_compat', 'sweet,display'))),
             ('canvas-width', u32(1125)),
             ('canvas-height', u32(2436)),
         ])])
 
-    fbcon = node('sweet-fbcon', [
+    fb, fb_size = bp['fb']
+    fbcon_props = [
         ph(),
-        ('reg', u64(FB, FB_SIZE)),
-        ('width', u32(FB_W)),
-        ('height', u32(FB_H)),
-        ('stride', u32(FB_STRIDE)),
-    ])
+        ('reg', u64(fb, fb_size)),
+        ('width', u32(bp['fb_w'])),
+        ('height', u32(bp['fb_h'])),
+        ('stride', u32(bp['fb_stride'])),
+    ]
+    # lancelot's scanout does not start at the first pixel of the line and LK's
+    # splash layer keeps the top of the panel (measured, docs/lancelot-hardware.md
+    # §6). A console driver must honour both; on sweet they are zero.
+    if bp.get('scanout_xoff') or bp.get('scanout_ytop'):
+        fbcon_props += [('scanout-xoff', u32(bp['scanout_xoff'])),
+                        ('scanout-ytop', u32(bp['scanout_ytop']))]
+    fbcon = node(f'{board}-fbcon', fbcon_props)
 
     # bsd/dev/sweet_ufs.c: the UFS host ABL leaves running (absolute physical reg).
-    ufs = node('sweet-ufs', [
-        ph(),
-        ('compatible', cstr('qcom,ufshc')),
-        ('reg', u64(UFS, UFS_SIZE)),
-    ])
+    # lancelot has no UFS: its eMMC (MSDC0) lands in M4.
+    ufs = None
+    if bp['ufs']:
+        ufs, ufs_size = bp['ufs']
+        ufs = node('sweet-ufs', [
+            ph(),
+            ('compatible', cstr('qcom,ufshc')),
+            ('reg', u64(ufs, ufs_size)),
+        ])
 
     # pmap_compute_max_asids requires the node even when no overrides are set.
     # An absent pmap-max-asids property selects XNU's own MAX_ASIDS default.
@@ -231,20 +306,33 @@ def build(seed=None, qemu=False, highmem=False):
     # (iPhone10,3). 'xiaomi,sweet' stays for SweetPlatformExpert matching.
     return node('device-tree', [
         ph(),
-        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + cstr('qcom,sm7150') + cstr('AppleARM')),
+        ('compatible', cstr('D22AP') + cstr('iPhone10,3') +
+         cstr(bp['model_compat'][0]) + cstr(bp['model_compat'][1]) + cstr('AppleARM')),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('D22')),
         ('target-sub-type', cstr('D22AP')),
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product +
+       ([] if (qemu or not ufs) else [ufs]))
 
 
 if __name__ == '__main__':
-    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv)
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    board = 'sweet'
+    seed = None
+    for i, a in enumerate(sys.argv[1:]):
+        if a == '--board':
+            board = sys.argv[i + 2]
+        elif a == '--seed':
+            seed = bytes.fromhex(sys.argv[i + 2])
+    if board not in BOARDS:
+        sys.exit(f'--board must be one of: {", ".join(BOARDS)}')
+    root = build(seed=seed, qemu='--qemu' in sys.argv,
+                 highmem='--highmem' in sys.argv, board=board)
     blob = adt.serialize(root)
-    open(sys.argv[1], 'wb').write(blob)
+    open(args[0], 'wb').write(blob)
     if '--dump' in sys.argv:
         adt.dump(adt.parse(blob)[0])
     print(f'{sys.argv[1]}: {len(blob)} bytes', file=sys.stderr)

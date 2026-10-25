@@ -370,10 +370,31 @@ live FDT and draws a console at a measured address, pitch and offset. That is th
 whole output path the kernel will need in M3, and the DRAM map is now a measured fact
 rather than a DTB guess.
 
-**Next:** M3 - `BOARD_LANCELOT` in the XNU config (`xnu/config/`), an ADT from
-`tools/mkadt.py --board lancelot` carrying the measured memory map, GICv3 at
-`0x0c000000`, CNTFRQ 13 MHz and `cpus=1`, then the first kernel boot with the console
-wired to this framebuffer mapping.
+**M3 opened: the ADT (`tools/mkadt.py --board lancelot`).** The generator is now
+board-parameterised (`--board sweet|lancelot`, plus `--seed` for reproducible
+output). The sweet tree is **byte-identical** to the previous version for the same
+seed, which is the check that the refactor changed nothing inherited. The lancelot
+tree carries only measured or DTB-backed values:
+
+- DRAM `0x40000000` + `0x3dcb0000` (988 MiB): the part of the 4 GiB bank below the
+display carve-out at `0x7dcb0000`, which LK keeps. Panic log carved from the top as
+on sweet.
+- GICv3 dist `0x0c000000` +`0x40000`, redist `0x0c040000` +`0x200000`, **PPI 27**
+  (the GICv3 virtual timer; sweet uses Qualcomm's 19).
+- `timebase-frequency` = 13 MHz (`0xc65d40`), measured from CNTFRQ_EL0.
+- `lancelot-fbcon`: `0x7e605000`, 1080x2340, stride 4320, plus `scanout-xoff 256`
+  and `scanout-ytop 520` - the console driver must honour both.
+- No Qualcomm UFS node; eMMC/MSDC0 is M4.
+- Identity stays iPhone X: `D22AP|iPhone10,3|xiaomi,lancelot|mediatek,mt6768|AppleARM`.
+
+Known gap, deliberately left visible in the code: CPU `reg` is still `core << 8`
+(one core per cluster). MTK puts the two A75 in affinity 1 (`0x100/0x101`) and the six
+A55 in affinity 0 (`0x000-0x005`), so the real MPIDRs must be read from the live FDT
+before the first SMP boot. M3 boots `cpus=1`, which only uses cpu0.
+
+**Next:** `config/MASTER.arm64.lancelot` plus the minimum set of Sweet* drivers
+renamed/reduced for MTK (platform expert, framebuffer console, TOPRGU watchdog), then
+`tools/xnu-cc.py` and one CI run before any flash.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
