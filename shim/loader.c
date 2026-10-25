@@ -153,11 +153,21 @@ const char *loader_boot(uintptr_t dtb)
 	for (int i = 0; i < BOOT_LINE_LENGTH; i++)
 		ba->CommandLine[i] = p->cmdline[i];
 	ba->memSizeActual = p->mem_size;
-	con_hex2("BOOTARG", "pa=", ba_pa, "top=", top);
 
 	uintptr_t entry_pa = p->entry_va + pa_of_va_base;
+	/* First words of the code that is actually at the entry point: __start is
+	 * a branch in the CI kernel, anything else means the copy went elsewhere. */
+	con_hex2("ENTRYW", "w0=", ((const volatile uint32_t *)entry_pa)[0],
+	         "w1=", ((const volatile uint32_t *)entry_pa)[1]);
+	con_hex2("BOOTARG", "pa=", ba_pa, "top=", top);
 	con_hex("JUMP", entry_pa);
-	con_str("XNU", "jumping (fbcon clears screen)");
+	con_str("XNU", "jumping");
+
+	/* Magenta strip, just under LK's splash: it stays on screen when the kernel
+	 * dies before it owns the display, and xnu's stage-0 band lands white
+	 * inside its left end, so one photo separates "never jumped" from
+	 * "jumped, then hung". */
+	con_rect(0, TOP_VISIBLE, CANVAS_W, TOP_VISIBLE + 48, 0xffff00ffU);
 
 	/* Everything was written with the MMU and caches off; drop any stale I-cache lines too. */
 	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");

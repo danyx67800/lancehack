@@ -172,19 +172,12 @@ void shim_main(uint64_t dtb)
 	con_clear(BLACK);
 	/* The canvas is the part of the panel that is both ours (LK's splash layer
 	 * owns the top) and free of the scanout shift (see FB_XOFF in board.h).
-	 * The white frame and the two corner squares make the photo measurable: if
-	 * they do not sit where the frame says, the offset is off by that much. */
-	con_set_top(TOP_VISIBLE + 100);
-	con_rect(8, TOP_VISIBLE + 20, CANVAS_W + 8, TOP_VISIBLE + 26, WHITE);
-	con_rect(8, FB_H - 20, CANVAS_W + 8, FB_H - 14, WHITE);
-	con_rect(8, TOP_VISIBLE + 20, 14, FB_H - 14, WHITE);
-	con_rect(CANVAS_W + 2, TOP_VISIBLE + 20, CANVAS_W + 8, FB_H - 14, WHITE);
-	con_rect(20, TOP_VISIBLE + 34, 80, TOP_VISIBLE + 94, RED);
-	con_rect(CANVAS_W - 60, FB_H - 80, CANVAS_W, FB_H - 20, GREEN);
+	 * The first 48 rows stay empty: the loader paints them magenta right
+	 * before it jumps, so a photo taken afterwards says whether the jump ever
+	 * happened even when the kernel dies before it owns the screen. */
+	con_set_top(TOP_VISIBLE + 56);
 	band(0, RED);
-	con_str("S1 FB", "frame on black");
-	con_hex("FBBASE", FB_BASE);
-	con_hex("STRIDE", FB_STRIDE);
+	con_str("S1 FB", "writable");
 	con_skip();
 
 	/* S2: the watchdog, verified. */
@@ -209,7 +202,6 @@ void shim_main(uint64_t dtb)
 	/* LK's own value, versus the placeholder in the DTBO. */
 	fbb = p.fb_base_l | (p.fb_base_h << 32);
 	con_hex2("FBARG", "lo=", (uint32_t)fbb, "hi=", (uint32_t)(fbb >> 32));
-	con_hex("VRAM", p.vram);
 
 	/* The real memory map: the point of M2, and no public DTB has it. Two banks
 	 * are enough for the 4 GB SKU and keep the report inside the screen. */
