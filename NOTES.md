@@ -412,6 +412,51 @@ a shortcut: its platform expert matches `xiaomi,sweet` and its framebuffer node 
 `sweet-fbcon`, neither of which the lancelot ADT provides, so a boot with it would fail
 before the console and teach nothing.
 
+**M3, first LANCELOT kernel build (2026-10-25).** XNU now *compiles and links* for
+lancelot. The series grew three patches and the build found five real differences:
+
+- `0082-lancelot-machine-config.patch` - `config/MASTER.arm64.lancelot`, the sweet
+  config retargeted (open-source asm + pmap, no Apple/Qualcomm code).
+- `0083-lancelot-board-config.patch` - `pexpert/pexpert/arm64/LANCELOT.h` (only
+  measured values: GICv3 `0x0c000000`/`0x0c040000`, 16K pages, CNTFRQ 13 MHz, vtimer
+  PPI 27, IPI SGI 1, 8 cores) plus the *sweet -> sweet or LANCELOT* widening of every
+  guard on the non-Apple code paths (PRNG, physmap, vm_kern ramdisk plumbing, GIC
+  routing, SMP opt-in, crash log and process sampler in `osfmk/kern/exception.c`).
+  `LANCELOT.h` is a **new** file and must ship inside the patch: the first two runs
+  failed at `installhdrs` because `git add -N` was missing and the header was silently
+  left out.
+- `0084-lancelot-sweet-build-flags.patch` - `bsd/conf/Makefile.template` and
+  `libkern/conf/Makefile.template` gated the HFS compat header, the bundled libpthread
+  and the BearSSL include paths on `CURRENT_MACHINE_CONFIG == SWEET`; without it Apple's
+  HFS sources compiled with `CONFIG_PROTECT` on and reached for AppleKeyStore.
+- The three staging scripts (`0019-stage-libpthread.sh`, `0020-stage-bearssl.sh`,
+  `0026-stage-hfs.sh`) exited silently for any board but SWEET, so the LANCELOT tree
+  had no `bsd/sweet_hfs` at all; they now accept both.
+- Link failed on `sweet_sample_task` only because its definition was inside the
+  `ARM64_BOARD_CONFIG_SWEET` block while its caller `bsd/dev/sweet_sample.c` is built
+  for every board.
+
+**Green run `40177231428`** (`gh workflow run xnu.yml -f machine_config=LANCELOT`),
+commit `fe7bff1`. Artifact `xnu-kernel.zip`: `kernel.development.lancelot`, Mach-O
+arm64, 16 974 144 bytes, SHA-256
+`dfbe260cc57b4265b990849210fe05de9a3fc131724b5611ab4b2e59b79106fd`. A build is not a
+boot: nothing has been flashed since TEST #11 and the phone still holds the M2 probe in
+`recovery`.
+
+**Next, in this order:**
+
+1. Platform expert: `0016-sweet-device-tree-platform-expert` matches `xiaomi,sweet`
+   only, so this kernel would stop before the console. Add `xiaomi,lancelot` (the name
+   the ADT already publishes) instead of renaming the board.
+2. Console: `osfmk/console/serial_console.c` binds `sweet-fbcon`; the ADT node is
+   `lancelot-fbcon`, and the driver must honour `scanout-xoff 256` / `scanout-ytop 520`
+   measured in TEST #9/#10 or text lands 256 px off-screen.
+3. TOPRGU: the shim stops the watchdog today; the kernel needs its own disable (or a
+   serviced timer) before anything that blocks for long.
+4. Then `tools/xnu-cc.py` against this run's build tree, pack the kernel as the
+   `SWEETXNU` payload of a shim boot image and test (flash `recovery` again, with the
+   user's confirmation; restore image `backup/lancelot-lineage/recovery.img`).
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
