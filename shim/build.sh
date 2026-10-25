@@ -23,6 +23,10 @@ lancelot)
 	# No UFS probe and no Qualcomm payload loader on this board: lancelot.c
 	# provides shim_main, and the storage/display work lands in later patches.
 	SRCS="start.S lancelot.c console.c mmu.c fdt_lance.c"
+	# PROBE=geom swaps the instrument for the raw-buffer geometry probe
+	# (shim/geom.c): colour quarters and big digits, no coordinate maths.
+	[ "${PROBE:-}" = geom ] && SRCS="start.S geom.c mmu.c"
+	[ "${PROBE:-}" = geom ] && OUTNAME=shim-boot-lancelot-geom.img
 	DTB=${DTB:-../dtb/lancelot-boot/dtb}
 	MKBOOTIMG=${MKBOOTIMG:-python3 ../tools/mkbootimg.py}
 	CFLAGS="$CFLAGS -DBOARD_LANCELOT"
@@ -85,12 +89,27 @@ if [ "$BOARD" = lancelot ]; then
 		gzip -9 -n -c out/Image > out/Image.gz
 		KERNEL=out/Image.gz
 	fi
+	# The cmdline is not cosmetic. MTK LK's platform_parse_bootopt() starts
+	# with g_is_64bit_kernel = 0 and only switches the handoff to AArch64 when
+	# it finds the final "64" of bootopt=64S3,32N2,64N2; without it LK jumps
+	# into our 64-bit payload in AArch32 state (wrong instruction set, instant
+	# fault). Copied verbatim from the shipped LineageOS recovery.img.
+	CMDLINE="bootopt=64S3,32N2,64N2 androidboot.serialconsole=0"
+	# recovery_dtbo: also taken from that image, where LK/recovery expect it.
+	# Not in git (dtb/ is ignored); see docs/lancelot-hardware.md for the source.
+	RDTBO=${RDTBO:-../dtb/lancelot-boot/recovery_dtbo.img}
+	RDTBO_ARG=""
+	if [ -f "$RDTBO" ]; then
+		RDTBO_ARG="--recovery_dtbo $RDTBO"
+	else
+		echo "note: no recovery_dtbo at $RDTBO, building without it" >&2
+	fi
 	$MKBOOTIMG --header_version 2 --kernel "$KERNEL" --ramdisk out/ramdisk.bin \
-		--dtb "$DTB" --base 0x40078000 --kernel_offset 0x8000 \
+		--dtb "$DTB" $RDTBO_ARG --base 0x40078000 --kernel_offset 0x8000 \
 		--ramdisk_offset 0x7c08000 --tags_offset 0xbc08000 --dtb_offset 0xbc08000 \
 		--pagesize 2048 --os_version 11.0.0 --os_patch_level 2026-10 \
-		--cmdline "console=null" -o out/shim-boot.img
-	cp out/shim-boot.img out/shim-boot-lancelot.img
+		--cmdline "$CMDLINE" -o out/shim-boot.img
+	cp out/shim-boot.img "out/${OUTNAME:-shim-boot-lancelot.img}"
 else
 	$MKBOOTIMG --header_version 2 --kernel out/Image --ramdisk out/ramdisk.bin \
 		--dtb "$DTB" --base 0 --kernel_offset 0x8000 --ramdisk_offset 0x1000000 \

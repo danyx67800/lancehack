@@ -1,6 +1,13 @@
 /*
- * Minimal text console on the ABL splash framebuffer. With the MMU off
- * every access is Device memory, so stay aligned (-mstrict-align).
+ * Minimal text console on the bootloader's splash framebuffer.
+ *
+ * The console draws in SCREEN coordinates: (0,0) is the top-left pixel the user
+ * sees. How that maps into the buffer the bootloader handed over is per-board
+ * (FB_ROT). lancelot is the interesting one: its panel is scanned from a
+ * landscape buffer, rotated 90 degrees clockwise (measured, TEST #6).
+ *
+ * With the MMU off every access is Device memory, so stay aligned
+ * (-mstrict-align) and keep the stores 32-bit.
  */
 #include "console.h"
 #include "font.h"
@@ -8,7 +15,7 @@
 #define SCALE		3
 #define CH_W		(8 * SCALE)
 #define CH_H		(16 * SCALE)
-#define MARGIN		24
+#define MARGIN		16
 #define LABEL_COLS	8
 
 /* Set at runtime: a statically initialised absolute pointer would leave an
@@ -16,18 +23,53 @@
 volatile uint32_t *con_fb;
 static uint32_t con_bg;
 static int row;
+/* First text row, in screen pixels. Boards where part of the panel is covered
+ * by another layer raise it above MARGIN with con_set_top(). */
+static int con_top = MARGIN;
+
+void con_set_top(int y)
+{
+	con_top = y;
+}
+
+/* Screen pixel -> framebuffer word. FB_STRIDE is the buffer's line pitch in
+ * bytes; FB_W/FB_H are always what the panel shows. FB_XOFF is the measured
+ * shift of the scanout inside each line (see board.h): panel column x shows
+ * buffer column x + FB_XOFF. Callers stay below FB_W - FB_XOFF so nothing
+ * wraps into the next row. */
+static inline volatile uint32_t *px(int x, int y)
+{
+	return con_fb + (uint32_t)y * (FB_STRIDE / 4) +
+	       (uint32_t)(x + FB_XOFF);
+}
 
 void con_clear(uint32_t bg)
 {
+	uint32_t n = (uint32_t)FB_W * FB_H;
+
 	if (!con_fb)
 		con_fb = (volatile uint32_t *)(uintptr_t)FB_BASE;
-	for (int y = 0; y < FB_H; y++) {
-		volatile uint32_t *line = con_fb + y * (FB_STRIDE / 4);
-		for (int x = 0; x < FB_W; x++)
-			line[x] = bg;
-	}
+	/* The buffer is the exact frame with no padding on both boards, so this is
+	 * a linear fill whatever the rotation. */
+	for (uint32_t i = 0; i < n; i++)
+		con_fb[i] = bg;
 	con_bg = bg;
 	row = 0;
+}
+
+void con_rect(int x0, int y0, int x1, int y1, uint32_t colour)
+{
+	if (x0 < 0)
+		x0 = 0;
+	if (y0 < 0)
+		y0 = 0;
+	if (x1 > FB_W)
+		x1 = FB_W;
+	if (y1 > FB_H)
+		y1 = FB_H;
+	for (int y = y0; y < y1; y++)
+		for (int x = x0; x < x1; x++)
+			*px(x, y) = colour;
 }
 
 static void put_char(int col, char ch, uint32_t fg)
@@ -35,18 +77,15 @@ static void put_char(int col, char ch, uint32_t fg)
 	if (ch < 0x20 || ch > 0x7e)
 		ch = '?';
 	const unsigned char *g = font8x16[ch - 0x20];
-	int x0 = MARGIN + col * CH_W, y0 = MARGIN + row * CH_H;
+	int x0 = MARGIN + col * CH_W, y0 = con_top + row * CH_H;
 	if (x0 + CH_W > FB_W || y0 + CH_H > FB_H)
 		return;
 	for (int gy = 0; gy < 16; gy++)
 		for (int gx = 0; gx < 8; gx++) {
 			uint32_t c = (g[gy] & (0x80 >> gx)) ? fg : con_bg;
-			for (int sy = 0; sy < SCALE; sy++) {
-				volatile uint32_t *p = con_fb + (y0 + gy * SCALE + sy) * (FB_STRIDE / 4)
-						       + x0 + gx * SCALE;
+			for (int sy = 0; sy < SCALE; sy++)
 				for (int sx = 0; sx < SCALE; sx++)
-					p[sx] = c;
-			}
+					*px(x0 + gx * SCALE + sx, y0 + gy * SCALE + sy) = c;
 		}
 }
 

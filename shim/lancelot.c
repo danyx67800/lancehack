@@ -1,14 +1,40 @@
 /*
- * lancelot (MT6769V/CU, Redmi 9) milestone-2 probe.
+ * lancelot (MT6769V/CU, Redmi 9) - milestone-2 instrument.
  *
- * Booted from the recovery partition, entered by LK at EL1 with the MMU off
- * and x0 = the FDT LK built for us (base DTB + dtbo overlays + its own
- * /chosen atags). One boot answers:
- *   - did our code run at all (colour bars, and a reset after ~90 s)
- *   - the live DRAM map (the shipped DTB only carries a 997 MiB placeholder)
- *   - the framebuffer LK actually reports, versus the one in board.h
- *   - GICv3 identification, CNTFRQ, MPIDR, CurrentEL
- * The MediaTek watchdog is stopped first, or the phone resets mid-probe.
+ * LK enters us at EL1 with the MMU off and x0 = the FDT it built (base DTB +
+ * dtbo overlays + its own /chosen atags). There is no UART and no USB, so the
+ * screen is the only output channel: this build has to answer everything it
+ * can in a single boot, and it must be readable without a working timer.
+ *
+ * Display geometry (measured, TEST #6)
+ * ------------------------------------
+ * The buffer LK hands over is the panel's image rotated 90 degrees clockwise:
+ * 2340 px per line, 1080 lines, base 0x7e605000. shim/console.c owns that
+ * mapping, so everything below is written in SCREEN pixels - (0,0) is the
+ * top-left pixel the user sees. A white frame is drawn around the screen: if
+ * all four sides are visible, the geometry is right.
+ *
+ * How it reports
+ * --------------
+ * A full-width colour BAND is drawn after each stage completes, stacked from
+ * the bottom of the panel upwards, in this order:
+ *
+ *   S1 red     framebuffer writable at FB_BASE
+ *   S2 orange  TOPRGU watchdog stopped, and verified by reading it back
+ *   S3 yellow  system counter (CNTPCT) sampled twice
+ *   S4 green   FDT parsed from x0 (/chosen atags + /memory banks)
+ *   S5 cyan    GICD identification read
+ *   S6 blue    GICR redistributor 0 read
+ *   S7 white   end of the probe
+ *
+ * The first missing band is the stage that failed, and the bands are persistent
+ * state, so no delay is needed to read the result: the timer is one of the
+ * things under test, not a tool. A synchronous exception turns the whole
+ * screen magenta and prints ESR/ELR/FAR instead.
+ *
+ * Nothing here resets the phone. A failed boot used to reset back into the same
+ * boot target, and on 2026-10-24 that produced a recovery loop that cost the
+ * user fastboot. The shim now always hangs: hold Power ~15 s to get out.
  *
  * Nothing here writes a partition or touches a peripheral beyond TOPRGU, the
  * GIC and the framebuffer.
@@ -20,208 +46,199 @@
 
 /* arm,gic-v3: dist 0x0c000000 +0x40000, redist 0x0c040000 +0x200000 (8 PEs). */
 #define GICD_BASE		0x0c000000UL
-#define GICR_BASE		0x0c040000UL
-#define GICR_STRIDE		0x40000UL
-#define GICR_PE_MAX		8
 #define GICD_CTLR		0x00
 #define GICD_TYPER		0x04
+#define GICR_BASE		0x0c040000UL
 #define GICR_TYPER		0x08
 #define GICR_WAKER		0x14
 
 #define FDT_MAGIC		0xd00dfeedU
-#define PSCI_SYSTEM_RESET	0x84000009UL
+
+/* TOPRGU WDT_MODE bit 0 = ENABLE (docs/lancelot-hardware.md §9). */
+#define TOPRGU_MODE_EN		0x1UL
+
+/* ---- screen layout ---- */
+
+#define BAND_H			64
+#define BAND_GAP		6
+#define BORDER			6
+
+#define ORANGE			0xffff8000U
+#define CYAN			0xff00ffffU
+#define MAGENTA			0xffff00ffU
+#define BLACK			0xff000000U
 
 #define rsr(r) ({ uint64_t _v; __asm__ volatile("mrs %0, " r : "=r"(_v)); _v; })
-#define wsr(r, v) __asm__ volatile("msr " r ", %0" : : "r"((uint64_t)(v)))
 
 static inline uint32_t rd32(uintptr_t a) { return *(volatile uint32_t *)a; }
 static inline void wr32(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; }
 
 static uint32_t be32(uintptr_t a) { return __builtin_bswap32(rd32(a)); }
 
-extern volatile uint32_t *con_fb;
-
-/*
- * MTK firmware leaves CNTFRQ_EL0 at 0 on this SoC - Linux reads the frequency
- * from the DT (timer/clock-frequency = 13 MHz) - and a zero frequency would
- * turn every delay into zero. Keep the raw value for the report.
- */
-static uint64_t cntfrq_raw;
-
-static uint64_t timer_hz(void)
+static void __attribute__((noreturn)) hang(void)
 {
-	return cntfrq_raw ? cntfrq_raw : 13000000UL;
+	for (;;)
+		__asm__ volatile("wfe");
 }
 
-static void sleep_ms(uint64_t ms)
+/* The breadcrumb. Band 0 (red) sits at the very bottom of the screen and the
+ * stack grows upwards, so the topmost coloured band is the last stage reached. */
+static void band(int i, uint32_t colour)
 {
-	uint64_t f = timer_hz();
-	uint64_t end = rsr("cntpct_el0") + f * ms / 1000;
+	int y0 = FB_H - (i + 1) * BAND_H;
 
-	while (rsr("cntpct_el0") < end)
-		;
+	/* Only as wide as the canvas: past FB_W - FB_XOFF the writes would wrap
+	 * into the next buffer row. */
+	con_rect(0, y0, CANVAS_W, y0 + BAND_H - BAND_GAP, colour);
 }
 
 /* ---- watchdog ---- */
 
-static uint32_t wdt_mode;
+static uint32_t wdt_before, wdt_after;
 
-static void wdt_stop(void)
+/* The watchdog has to die early, or it eventually resets the phone mid-probe.
+ * The write is verified: on some SoCs the key is silently dropped, and a
+ * reset a couple of seconds in is exactly what that looks like. */
+static int wdt_stop(void)
 {
 	if (!TOPRGU_BASE)
-		return;
-	wdt_mode = rd32(TOPRGU_BASE + TOPRGU_WDT_MODE);
-	wr32(TOPRGU_BASE + TOPRGU_WDT_MODE, (wdt_mode & ~1UL) | TOPRGU_MODE_KEY);
+		return 0;
+	wdt_before = rd32(TOPRGU_BASE + TOPRGU_WDT_MODE);
+	wr32(TOPRGU_BASE + TOPRGU_WDT_MODE,
+	     (wdt_before & ~TOPRGU_MODE_EN) | TOPRGU_MODE_KEY);
 	__asm__ volatile("dsb sy" ::: "memory");
+	wdt_after = rd32(TOPRGU_BASE + TOPRGU_WDT_MODE);
+	return !(wdt_after & TOPRGU_MODE_EN);
 }
 
-/* ---- stage breadcrumbs ---- */
+/* ---- exception path ---- */
 
-static void bar(uint32_t colour, int stage)
-{
-	char label[] = "S0";
+static volatile int in_panic;
 
-	label[1] = '0' + stage;
-	for (int y = FB_H - 90; y < FB_H - 10; y++) {
-		volatile uint32_t *line = con_fb + (uint32_t)y * (FB_STRIDE / 4);
-		for (int x = 10; x < FB_W - 10; x++)
-			line[x] = colour;
-	}
-	con_str("STAGE", label);
-}
-
-/* ---- reset ---- */
-
-static void smc_reset(void)
-{
-	register uint64_t x0 __asm__("x0") = PSCI_SYSTEM_RESET;
-
-	__asm__ volatile("smc #0" : "+r"(x0) : : "x1", "x2", "x3", "memory");
-}
-
-static void __attribute__((noreturn)) reset_now(void)
-{
-	if (TOPRGU_BASE) {
-		wr32(TOPRGU_BASE + TOPRGU_WDT_SWRST, TOPRGU_SWRST_KEY);
-		__asm__ volatile("dsb sy" ::: "memory");
-	}
-	smc_reset();
-	for (;;)
-		__asm__ volatile("wfe");
-}
-
-/* ---- entry points required by start.S ---- */
-
-/* No SMP in M2: PSCI CPU_ON is never issued, so this is never entered. */
 void secondary_main(uint64_t idx)
 {
 	(void)idx;
-	for (;;)
-		__asm__ volatile("wfe");
+	hang();
 }
 
 void exc_handler(uint64_t slot, uint64_t *regs)
 {
 	(void)regs;
-	con_clear(0xff0000a0U);
+	/* A fault raised while painting the panic screen must not re-enter here:
+	 * the stack would run into .bss and the report would be lost. */
+	if (in_panic)
+		hang();
+	in_panic = 1;
+	con_clear(MAGENTA);
 	con_str("PANIC", "lancelot shim");
-	con_hex2("SLOT", "n=", (uint32_t)slot, "mpidr=", (uint32_t)rsr("mpidr_el1"));
+	con_hex2("SLOT", "n=", (uint32_t)slot, "mp=", (uint32_t)rsr("mpidr_el1"));
 	con_hex("ESR", rsr("esr_el1"));
 	con_hex("ELR", rsr("elr_el1"));
 	con_hex("FAR", rsr("far_el1"));
-	sleep_ms(60000);
-	reset_now();
+	con_hex("SCTLR", rsr("sctlr_el1"));
+	con_str("HOLD", "Power 15s");
+	hang();
 }
 
 /* ---- main ---- */
+
+static uint64_t cntfrq_raw;
+static uint64_t t0, t1;
+
+/* Sample the system counter, without waiting on it. If it does not advance the
+ * old sleep_ms() waits and the hold-loops are meaningless, which is worth
+ * knowing before trusting any timed behaviour. */
+static void sample_timer(void)
+{
+	cntfrq_raw = rsr("cntfrq_el0");
+	t0 = rsr("cntpct_el0");
+	/* ~200k iterations of an empty loop: long enough for a 13 MHz counter to
+	 * move, short enough to be invisible. */
+	for (volatile uint32_t i = 0; i < 200000; i++)
+		;
+	t1 = rsr("cntpct_el0");
+}
 
 void shim_main(uint64_t dtb)
 {
 	struct lance_probe p;
 	uint64_t fbb;
-	int fb_live;
+	int wdt_ok;
 
-	/* The watchdog first: it is plain MMIO and must not be able to reset the
-	 * phone in the middle of the probe. */
-	wdt_stop();
-	cntfrq_raw = rsr("cntfrq_el0");
+	/* S1: the framebuffer, before anything that could fault. The base is the
+	 * DTBO value on purpose - this stage must not depend on the FDT parse. */
+	con_fb = (volatile uint32_t *)(uintptr_t)FB_BASE;
+	con_clear(BLACK);
+	/* The canvas is the part of the panel that is both ours (LK's splash layer
+	 * owns the top) and free of the scanout shift (see FB_XOFF in board.h).
+	 * The white frame and the two corner squares make the photo measurable: if
+	 * they do not sit where the frame says, the offset is off by that much. */
+	con_set_top(TOP_VISIBLE + 100);
+	con_rect(8, TOP_VISIBLE + 20, CANVAS_W + 8, TOP_VISIBLE + 26, WHITE);
+	con_rect(8, FB_H - 20, CANVAS_W + 8, FB_H - 14, WHITE);
+	con_rect(8, TOP_VISIBLE + 20, 14, FB_H - 14, WHITE);
+	con_rect(CANVAS_W + 2, TOP_VISIBLE + 20, CANVAS_W + 8, FB_H - 14, WHITE);
+	con_rect(20, TOP_VISIBLE + 34, 80, TOP_VISIBLE + 94, RED);
+	con_rect(CANVAS_W - 60, FB_H - 80, CANVAS_W, FB_H - 20, GREEN);
+	band(0, RED);
+	con_str("S1 FB", "frame on black");
+	con_hex("FBBASE", FB_BASE);
+	con_hex("STRIDE", FB_STRIDE);
+	con_skip();
 
-	/* LK passes the merged FDT in x0; fall back to the tags address. Read it
-	 * before touching the framebuffer: the base in the DTBO is a placeholder,
-	 * only LK's live value is authoritative. */
-	if (!dtb || be32(dtb) != FDT_MAGIC)
+	/* S2: the watchdog, verified. */
+	wdt_ok = wdt_stop();
+	band(1, ORANGE);
+	con_str("S2 WD", wdt_ok ? "stopped" : "STILL ARMED");
+	con_hex2("WDT", "b=", wdt_before, "a=", wdt_after);
+	con_skip();
+
+	/* S3: the counter. */
+	sample_timer();
+	band(2, YELLOW);
+	con_hex2("S3 TMR", "f=", (uint32_t)cntfrq_raw, "d=", (uint32_t)(t1 - t0));
+
+	/* S4: the live FDT. */
+	if (!dtb || (dtb & 3) || be32(dtb) != FDT_MAGIC)
 		dtb = LK_FDT_ADDR;
 	lance_fdt_probe(dtb, &p);
-
-	fbb = p.fb_base_l | (p.fb_base_h << 32);
-	/* Accept it only inside the framebuffer carve-out (0x7dcb0000 + 34 MiB):
-	 * a parsing mistake must never scribble over modem or SCP RAM. */
-	fb_live = p.valid && fbb >= 0x7dc00000UL && fbb < 0x7ff00000UL && !(fbb & 3);
-	con_fb = (volatile uint32_t *)(uintptr_t)(fb_live ? fbb : FB_BASE);
-
-	con_clear(0xff101010U);
-	con_str("SHIM", "lancelot M2 probe");
-	con_str("STAGE", "1 running");
-	bar(RED, 1);
-	con_str("STAGE", "2 watchdog stopped");
-	bar(YELLOW, 2);
-	bar(GREEN, 3);
-
-	con_str("SHIM", "lancelot M2 probe");
-	con_hex("EL", rsr("CurrentEL") >> 2);
-	con_hex("MPIDR", rsr("mpidr_el1"));
-	con_hex("CNTFRQ", cntfrq_raw);
-	con_hex("TIMER_HZ", timer_hz());
-	con_hex("MMFR0", rsr("id_aa64mmfr0_el1"));
-	con_hex("SCTLR", rsr("sctlr_el1"));
-	con_skip();
+	band(3, GREEN);
+	con_str("S4 FDT", p.valid ? "parsed" : "NOT PARSED");
 	con_hex("FDT", dtb);
-	con_hex2("FDT", "magic=", p.valid ? FDT_MAGIC : 0, "size=", p.totalsize);
-	con_hex("WD_MODE", wdt_mode);
-	con_skip();
-
-	con_hex2("FB_ARG", "live=", (uint32_t)fb_live, "lo=", (uint32_t)fbb);
-	con_hex2("FB", "w=", FB_W, "h=", FB_H);
+	/* LK's own value, versus the placeholder in the DTBO. */
+	fbb = p.fb_base_l | (p.fb_base_h << 32);
+	con_hex2("FBARG", "lo=", (uint32_t)fbb, "hi=", (uint32_t)(fbb >> 32));
 	con_hex("VRAM", p.vram);
-	con_hex2("LCM", "found=", (uint32_t)p.lcmfound,
-		 "stride=", (uint32_t)FB_STRIDE);
-	con_str("LCMNAME", p.lcmname[0] ? p.lcmname : "(none)");
-	con_skip();
 
-	/* The point of M2: the real memory map, which no public DTB has. */
-	for (int i = 0; i < p.nbanks; i++) {
+	/* The real memory map: the point of M2, and no public DTB has it. Two banks
+	 * are enough for the 4 GB SKU and keep the report inside the screen. */
+	for (int i = 0; i < p.nbanks && i < 2; i++) {
 		char label[] = "MEM0";
 
 		label[3] = '0' + i;
-		con_hex(label, p.mb_base[i]);
-		con_hex("   size", p.mb_size[i]);
+		con_hex2(label, "lo=", (uint32_t)p.mb_base[i], "hi=", (uint32_t)(p.mb_base[i] >> 32));
+		con_hex2("size", "lo=", (uint32_t)p.mb_size[i], "hi=", (uint32_t)(p.mb_size[i] >> 32));
 	}
 	if (!p.nbanks)
-		con_str("MEM", "no /memory reg found");
-	con_skip();
+		con_str("MEM", "no /memory reg");
 
-	/* GICv3 identification, read-only. */
-	con_hex2("GICD", "ctlr=", rd32(GICD_BASE + GICD_CTLR),
-		 "typer=", rd32(GICD_BASE + GICD_TYPER));
-	for (int i = 0; i < GICR_PE_MAX; i++) {
-		uintptr_t r = GICR_BASE + (uintptr_t)i * GICR_STRIDE;
-		uint64_t typer = (uint64_t)rd32(r + GICR_TYPER + 4) << 32 |
-				 rd32(r + GICR_TYPER);
-		char label[] = "GICR0";
+	/* S5: the distributor. */
+	band(4, CYAN);
+	con_hex2("GICD", "c=", rd32(GICD_BASE + GICD_CTLR), "t=", rd32(GICD_BASE + GICD_TYPER));
 
-		label[4] = '0' + i;
-		con_hex2(label, "aff=", (uint32_t)(typer >> 32), "waker=", rd32(r + GICR_WAKER));
-		if (typer & (1ULL << 4))
-			break;	/* Last */
+	/* S6: only our own redistributor. Reading one that is powered down can
+	 * wedge the interconnect on MTK, so the other seven wait for a later
+	 * milestone where there is a way to recover from it. */
+	{
+		uint64_t typer = (uint64_t)rd32(GICR_BASE + GICR_TYPER + 4) << 32 |
+				 rd32(GICR_BASE + GICR_TYPER);
+
+		band(5, BLUE);
+		con_hex2("GICR", "a=", (uint32_t)(typer >> 32), "w=", rd32(GICR_BASE + GICR_WAKER));
 	}
 
-	con_str("STAGE", "4 probe done, reset in 120s");
-	bar(BLUE, 4);
-	/* The wait is the breadcrumb when the panel shows nothing: if the phone
-	 * reboots after ~2 minutes our code ran to the end, if it reboots after a
-	 * few seconds it did not. */
-	sleep_ms(120000);
-	con_str("RESET", "now");
-	sleep_ms(2000);
-	reset_now();
+	/* S7: done. Hang, never reset. */
+	band(6, WHITE);
+	con_str("S7 DONE", "Power 15s to leave");
+	hang();
 }
