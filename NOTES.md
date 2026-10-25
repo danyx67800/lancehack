@@ -443,6 +443,22 @@ arm64, 16 974 144 bytes, SHA-256
 boot: nothing has been flashed since TEST #11 and the phone still holds the M2 probe in
 `recovery`.
 
+**TEST #12 prepared and flashed (2026-10-25).** Patch `0085` (commit `da61d7c`) makes
+the platform expert match `xiaomi,lancelot` and gives the framebuffer console a
+per-board node name plus `scanout-xoff`/`scanout-ytop`, so it can draw inside the area
+the panel actually shows. CI run `40178788512` is green: `kernel.development.lancelot`
+`849d0ffc651c0f0a3527e695cbaf6b10dcc3a3590c84b02a0b0e8faea06d7c0d`.
+
+`tools/mkpayload.py` + `shim/build.sh` produced `shim/out/shim-boot-lancelot.img`,
+16 660 480 bytes, SHA-256
+`6c422b29e1d319c66044457588f20f7b1cb5e5eaa7eb110677ab627fc4b84a89`: 10 segments, entry
+`0xfffffe000747f488`, ADT `0xa016` bytes with `lancelot-fbcon`, `scanout-xoff`,
+`scanout-ytop` and `xiaomi,lancelot` all present in the payload. Flashed to `recovery`
+with the user's confirmation (`Sending 16270 KB / Writing OKAY`). `fastboot reboot`
+boots Android on this board, so the shim has to be reached with **Vol+ + Power** from
+a powered-off phone; that key boot writes no BCB, which is why it is preferred to
+`adb reboot recovery` (the route that caused the earlier loop).
+
 **Next, in this order:**
 
 1. Platform expert: `0016-sweet-device-tree-platform-expert` matches `xiaomi,sweet`
