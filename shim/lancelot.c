@@ -43,6 +43,7 @@
 #include "board.h"
 #include "console.h"
 #include "fdt_lance.h"
+#include "loader.h"
 
 /* arm,gic-v3: dist 0x0c000000 +0x40000, redist 0x0c040000 +0x200000 (8 PEs). */
 #define GICD_BASE		0x0c000000UL
@@ -237,8 +238,12 @@ void shim_main(uint64_t dtb)
 		con_hex2("GICR", "a=", (uint32_t)(typer >> 32), "w=", rd32(GICR_BASE + GICR_WAKER));
 	}
 
-	/* S7: done. Hang, never reset. */
+	/* S7: done. If LK handed us a ramdisk with a kernel payload, become its
+	 * iBoot: loader_boot() copies the segments, builds boot_args and jumps, and
+	 * only returns on error. With an empty ramdisk this is still the end of the
+	 * probe page, which is what makes the same image an instrument. */
 	band(6, WHITE);
-	con_str("S7 DONE", "Power 15s to leave");
+	con_str("S7 DONE", "probe complete");
+	con_str("LOADER", loader_boot(dtb));
 	hang();
 }

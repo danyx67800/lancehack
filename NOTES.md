@@ -392,9 +392,25 @@ Known gap, deliberately left visible in the code: CPU `reg` is still `core << 8`
 A55 in affinity 0 (`0x000-0x005`), so the real MPIDRs must be read from the live FDT
 before the first SMP boot. M3 boots `cpus=1`, which only uses cpu0.
 
+**M3, loader ported (2026-10-25).** `shim/loader.c` and `shim/fdt.c` are now part of
+the lancelot build, so the same image that runs the probe is also the iBoot stand-in:
+after `S7 DONE` it looks for a `SWEETXNU` payload at `/chosen linux,initrd-start`,
+copies the segments to `phys_base + (vmaddr - virt_base)`, places the ADT and
+`boot_args` behind the kernel and jumps with the MMU off. With an empty ramdisk it
+prints `LOADER no initrd in /chosen` (or `no SWEETXNU payload`) and stays on the probe
+page, so nothing regressed for the instrument path. The `boot_args` video fields use
+the measured geometry (`FB_BASE`, 4320-byte stride, 1080x2340).
+
+Checked after the build: `aarch64-elf-nm out/shim.elf` exports `loader_boot`,
+`fdt_chosen_u64` and `shim_main`, and the ABS64 guard (no absolute relocations in C
+objects) still passes.
+
 **Next:** `config/MASTER.arm64.lancelot` plus the minimum set of Sweet* drivers
 renamed/reduced for MTK (platform expert, framebuffer console, TOPRGU watchdog), then
-`tools/xnu-cc.py` and one CI run before any flash.
+`tools/xnu-cc.py` and one CI run before any flash. The sweet kernel artifact is *not*
+a shortcut: its platform expert matches `xiaomi,sweet` and its framebuffer node is
+`sweet-fbcon`, neither of which the lancelot ADT provides, so a boot with it would fail
+before the console and teach nothing.
 
 ## Agent handoff / active work (2026-10-15, latest)
 

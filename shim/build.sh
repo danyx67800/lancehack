@@ -22,7 +22,10 @@ lancelot)
 	CROSS=${CROSS:-aarch64-elf-}
 	# No UFS probe and no Qualcomm payload loader on this board: lancelot.c
 	# provides shim_main, and the storage/display work lands in later patches.
-	SRCS="start.S lancelot.c console.c mmu.c fdt_lance.c"
+	# loader.c is the iBoot stand-in: it finds a SWEETXNU payload in the ramdisk
+	# and jumps to it with boot_args. Without a payload it reports the error and
+	# the probe page stays, so the same image is still an instrument.
+	SRCS="start.S lancelot.c console.c mmu.c fdt_lance.c loader.c fdt.c"
 	# PROBE=geom swaps the instrument for the raw-buffer geometry probe
 	# (shim/geom.c): colour quarters and big digits, no coordinate maths.
 	[ "${PROBE:-}" = geom ] && SRCS="start.S geom.c mmu.c"
