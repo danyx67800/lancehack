@@ -1,3 +1,16 @@
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+index fde499c..ca5b461 100644
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1884,7 +1884,7 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
+ 		subcode = ut->uu_subcode;
+ 		etype = ut->uu_exception;
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_LANCELOT)
+ 		if (p == current_proc()) {
+ 			extern void sweet_crash_log(const char *, int, int, uint64_t, uint64_t);
+ 			sweet_crash_log(p->p_comm, proc_getpid(p), WTERMSIG(rv),
 diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
 index 69b13f9..2c96131 100644
 --- a/makedefs/MakeInc.def
@@ -216,6 +229,19 @@ index 437adb1..bb5819d 100644
  	/* No CPU/thread/debugger state is required for this first panic copy. */
  	sweet_early_panic(panic_format_str, panic_args);
  #endif
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+index a20a764..fccaf23 100644
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -820,7 +820,7 @@ exception_triage(
+ 	return exception_triage_thread(exception, code, codeCnt, thread);
+ }
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_LANCELOT)
+ #include <vm/vm_shared_region.h>
+ #include <arm/thread.h>
+ 
 diff --git a/osfmk/prng/entropy.c b/osfmk/prng/entropy.c
 index 42286ed..75575ba 100644
 --- a/osfmk/prng/entropy.c
