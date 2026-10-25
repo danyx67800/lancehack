@@ -522,8 +522,34 @@ jump ran; xnu's stage-0 band lands white inside its left end, and any
 bytes, image `shim/out/shim-boot-lancelot.img` **16 660 480 bytes**, SHA-256
 `7c5b2a6a5fe48333f08150850033610aabf0037b3281769c60756fdc5eea8540`. Flash target
 `recovery` only, restore `backup/lancelot-lineage/recovery.img`, boot from a powered-off
-phone with **Vol+ + Power**. Flashed (`Sending 16270 KB / Writing OKAY`), waiting for the
-observation.
+phone with **Vol+ + Power**. Flashed (`Sending 16270 KB / Writing OKAY`).
+
+**TEST #13 result: the jump works, the kernel dies at the MMU.** The photo shows the
+whole page now, through `ENTRYW w0=140006F5 w1=D503201F`, `BOOTARG pa=4208C000
+top=42090000`, `JUMP 4147F488` and `XNU jumping`, so the copy at the entry point is
+byte-for-byte the CI artifact's `__start` trampoline. The magenta strip is there with the
+**white stage-0 notch**: the jump ran, `start_first_cpu` executed, and the pre-MMU band at
+`0x7e605000 + 520*4320 + 1024` is on the panel. No `SWEET EARLY` line ever appears, so
+the kernel stops between setting `SCTLR_EL1` and the first mark in `arm_init`.
+
+**Cause (patch `0087`, commit `852c9be`).** The bootstrap/Final L2 block descriptor for the
+boot framebuffer used `0x7e400000`, which is **not 32MB-aligned** (`0x7e400000 & 0x1ffffff
+= 0x400000`). A block descriptor's output address must sit on its own size, so the mapping
+was either ignored or pointed 4MB off - either way the early console's writes after
+translation came on never reached the panel, and the first one may well have faulted and
+looped in the panic path (which prints through the same console). The aligned base is
+`0x7e000000` (`0x7e605000 & ~(32MB-1)`), and `BOARD_EARLY_FB_OFFSET` is derived from it.
+
+The same patch adds a **stage-0b blue band**, written through the MMU immediately after
+`SCTLR_EL1` is set. White only = still no translation-safe mapping; white + blue = the MMU
+and the framebuffer block work and anything after that is `arm_init`'s own problem.
+
+**TEST #14 prepared (2026-10-25).** CI run `40192125016` green:
+`kernel.development.lancelot` 17 011 376 bytes, SHA-256
+`a9ff9cc833ce42150a6c8d6c95bd08108751465619bb23625576a872cc3bdce7`, entry
+`0xfffffe000747f488`. Image `shim/out/shim-boot-lancelot.img` **16 660 480 bytes**,
+SHA-256 `9f40f3699d1a75db7f0bde6e1c64c4a9b504cbd3d76a3c50947c15e116a4f809`, ramdisk
+identical to the payload (10 segments, ADT `0xa016`).
 
 ## Agent handoff / active work (2026-10-15, latest)
 
