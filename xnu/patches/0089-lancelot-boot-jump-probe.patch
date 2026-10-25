@@ -1,0 +1,109 @@
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -43,6 +43,7 @@
+  * start_first_cpu draws; slots 1..11 follow it to the right.
+  */
+ .macro SWEET_BAND slot, colour
++	mov	x17, x0				// x0 carries the boot-args KVA into arm_init
+ 	MOV64	x0, BOARD_FB_STAGE0_ADDR
+ 	add		x0, x0, #(64 * \slot)
+ 	MOV64	x1, \colour
+@@ -57,6 +58,7 @@
+ 	subs	x2, x2, #1
+ 	b.ne	7b
+ 	dsb		sy
++	mov	x0, x17
+ .endm
+ #endif
+ 
+@@ -257,7 +259,11 @@
+ 	.global	EXT(LowExceptionVectorBase)
+ LEXT(LowExceptionVectorBase)
+ 	/* EL1 SP 0 */
++#if defined(LANCELOT)
++	b		Lsweet_fault_vector	// sync: paint and stop
++#else
+ 	b		.
++#endif
+ 	.align	7
+ 	b		.
+ 	.align	7
+@@ -266,7 +272,11 @@
+ 	b		.
+ 	/* EL1 SP1 */
+ 	.align	7
++#if defined(LANCELOT)
++	b		Lsweet_fault_vector	// sync: paint and stop
++#else
+ 	b		.
++#endif
+ 	.align	7
+ 	b		.
+ 	.align	7
+@@ -293,6 +303,20 @@
+ 	b		.
+ 	.align 12, 0
+ 
++#if defined(LANCELOT)
++/*
++ * Any exception taken between the ret into arm_init and the C console coming
++ * up is invisible otherwise: the real vectors need a current thread, and the
++ * bootstrap ones just spin. Paint red (slot 6) on the stage row and stop, so
++ * one photo separates "faulted" from "ran on". Only the primary CPU runs
++ * this table before the real vectors are reinstalled for secondaries.
++ */
++	.align	2
++Lsweet_fault_vector:
++	SWEET_BAND 6, 0xffff0000			// red: an exception got this far
++	b		.
++#endif
++
+ #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
+ /*
+  * Provide a global symbol so that we can narrow the V=P mapping to cover
+@@ -920,6 +944,20 @@
+ 
+ 	// If x21 != 0, we're doing a warm reset, so we need to trampoline to the kernel pmap.
+ 	cbnz	x21, Ltrampoline
++
++#if defined(LANCELOT)
++	/*
++	 * Any fault after this point must be visible: send exceptions back to the
++	 * bootstrap vectors, whose sync entries paint red (slot 6) and stop. The
++	 * real vectors installed above need a current thread and would just spin.
++	 */
++	adrp	x0, EXT(LowExceptionVectorBase)@page
++	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
++	add		x0, x0, x22
++	sub		x0, x0, x23
++	msr		VBAR_EL1, x0
++	isb
++#endif
+ 
+ 	// Set KVA of boot args as first arg
+ 	add		x0, x20, x22
+@@ -941,6 +979,9 @@
+ #if defined(SWEET) || defined(LANCELOT)
+ 	SWEET_BAND 3, 0xffffff00			// yellow: about to return into arm_init
+ #endif
++#if defined(LANCELOT)
++	SWEET_BAND 4, 0xff00ffff			// cyan: last asm point before the ret
++#endif
+ 
+ 	// Return to arm_init()
+ 	ret
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -347,7 +347,9 @@
+ 	DTEntry chosen = NULL;
+ 	unsigned int dt_entry_size = 0;
+ 
+-	sweet_early_band(4, 0xff00ffff);		/* cyan: C entry and stack work */
++	sweet_early_band(5, 0xffff8000);		/* orange: C entry and stack work.
++	 * Slot 4 is the cyan band start.s paints just before the ret, so slot 5
++	 * appearing is what proves this C function really ran. */
+ 	sweet_early_mark(1, "arm_init entered (MMU on)");
+ 
+ 	arm_setup_pre_sign();
