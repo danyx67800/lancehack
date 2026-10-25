@@ -1,0 +1,149 @@
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+index 0631685..e438266 100644
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -1,11 +1,12 @@
+ /*
+- * Minimal device-tree platform expert for Redmi Note 10 Pro (sweet).
++ * Minimal device-tree platform expert for the supported phones: Redmi Note
++ * 10 Pro (sweet, SM7150) and Redmi 9 (lancelot, MT6769V/CU).
+  * Uses XNU's normal platform, power-domain and nub initialization. Hardware
+  * interrupt and power-management services are supplied by separate drivers.
+  */
+ #include <pexpert/arm64/board_config.h>
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(LANCELOT)
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <IOKit/IOLib.h>
+@@ -79,4 +80,4 @@ SweetPlatformExpert::processTopLevel(IORegistryEntry *root)
+  * "compatible" string and "model" (D22AP / iPhone10,3 in the ADT), which
+  * is what the iPhone userland (MobileGestalt) expects.
+  */
+-#endif /* SWEET */
++#endif /* SWEET || LANCELOT */
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index 92f3e26..352e55e 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -82,6 +82,18 @@ const char * gIOKernelConfigTables =
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = SweetBattery;"
+     "   },"
++#elif defined(ARM64_BOARD_CONFIG_LANCELOT)
++    /*
++     * lancelot starts with the platform expert only: every other driver
++     * (display, input, battery, storage) lands with its own patch, and an
++     * IONameMatch that no node provides would only add noise.
++     */
++    "   {"
++    "     'IOClass'         = SweetPlatformExpert;"
++    "     'IOProviderClass' = IOPlatformExpertDevice;"
++    "     'IONameMatch'     = 'xiaomi,lancelot';"
++    "     'IOProbeScore'    = 10000:32;"
++    "   },"
+ #endif
+     "   {"
+     "     'IOClass'         = IOPanicPlatform;"
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+index 19f27cd..dbab60d 100644
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -707,6 +707,9 @@ register_serial_functions(struct pe_serial_functions *fns)
+  *   reg    = <phys size>       absolute physical address, not arm-io relative
+  *   width, height              pixels
+  *   stride                     bytes per line, 32bpp
++ *   scanout-xoff, scanout-ytop columns/rows the panel skips before the
++ *                              visible area (LK scans out from mid-line, and
++ *                              the strip at the top is LK's splash layer)
+  * Lines wrap back to the top instead of scrolling; the line after the cursor
+  * is kept blank so the newest output is easy to find.
+  */
+@@ -719,13 +722,17 @@ extern unsigned char iso_font[256 * 16];
+ 
+ static volatile uint32_t *fbcon_base;
+ static uint32_t fbcon_width, fbcon_height, fbcon_stride;
++static uint32_t fbcon_xoff, fbcon_ytop;
+ static uint32_t fbcon_cols, fbcon_rows, fbcon_col, fbcon_row;
+ 
+ static void
+ fbcon_clear_row(uint32_t row)
+ {
+ 	for (uint32_t y = row * 16 * FBCON_SCALE; y < (row + 1) * 16 * FBCON_SCALE; y++) {
+-		volatile uint32_t *line = fbcon_base + y * (fbcon_stride / 4);
++		volatile uint32_t *line = fbcon_base +
++		    (fbcon_ytop + y) * (fbcon_stride / 4) + fbcon_xoff;
++		/* fbcon_width is already the visible width: the columns after it
++		 * belong to the previous row on screen, not to this one. */
+ 		for (uint32_t x = 0; x < fbcon_width; x++) {
+ 			line[x] = FBCON_BG;
+ 		}
+@@ -776,7 +783,8 @@ fbcon_transmit_data(uint8_t c)
+ 	uint32_t x0 = fbcon_col * 8 * FBCON_SCALE, y0 = fbcon_row * 16 * FBCON_SCALE;
+ 	for (uint32_t gy = 0; gy < 16; gy++) {
+ 		for (uint32_t sy = 0; sy < FBCON_SCALE; sy++) {
+-			volatile uint32_t *line = fbcon_base + (y0 + gy * FBCON_SCALE + sy) * (fbcon_stride / 4) + x0;
++			volatile uint32_t *line = fbcon_base +
++			    (fbcon_ytop + y0 + gy * FBCON_SCALE + sy) * (fbcon_stride / 4) + fbcon_xoff + x0;
+ 			for (uint32_t gx = 0; gx < 8; gx++) {
+ 				uint32_t px = (glyph[gy] & (1u << gx)) ? FBCON_FG : FBCON_BG;
+ 				for (uint32_t sx = 0; sx < FBCON_SCALE; sx++) {
+@@ -818,7 +826,7 @@ fbcon_probe(void)
+ 	uint32_t const *val;
+ 	unsigned int size;
+ 
+-	if (SecureDTFindEntry("name", "sweet-fbcon", &entry) != kSuccess ||
++	if (SecureDTFindEntry("name", BOARD_FBCON_NODE, &entry) != kSuccess ||
+ 	    SecureDTGetProperty(entry, "reg", (void const **)&reg, &size) != kSuccess || size < 16) {
+ 		return;
+ 	}
+@@ -831,9 +839,19 @@ fbcon_probe(void)
+ 	if (SecureDTGetProperty(entry, "stride", (void const **)&val, &size) == kSuccess) {
+ 		fbcon_stride = *val;
+ 	}
+-	if (!fbcon_width || !fbcon_height || fbcon_stride < fbcon_width * 4) {
++	if (SecureDTGetProperty(entry, "scanout-xoff", (void const **)&val, &size) == kSuccess) {
++		fbcon_xoff = *val;
++	}
++	if (SecureDTGetProperty(entry, "scanout-ytop", (void const **)&val, &size) == kSuccess) {
++		fbcon_ytop = *val;
++	}
++	if (!fbcon_width || !fbcon_height || fbcon_stride < fbcon_width * 4 ||
++	    fbcon_xoff >= fbcon_width || fbcon_ytop >= fbcon_height) {
+ 		return;
+ 	}
++	/* From here on fbcon_width/height describe the area the panel shows. */
++	fbcon_width -= fbcon_xoff;
++	fbcon_height -= fbcon_ytop;
+ 	sweet_early_mark(17, "fbcon config read; mapping");
+ 	fbcon_base = (volatile uint32_t *)ml_io_map_wcomb(reg[0], reg[1]);
+ 	sweet_early_mark(18, "fbcon mapping returned");
+diff --git a/pexpert/pexpert/arm64/LANCELOT.h b/pexpert/pexpert/arm64/LANCELOT.h
+index a143a68..74bb3e4 100644
+--- a/pexpert/pexpert/arm64/LANCELOT.h
++++ b/pexpert/pexpert/arm64/LANCELOT.h
+@@ -42,6 +42,9 @@
+ #define BOARD_VTIMER_INTID        LANCELOT_VTIMER_INTID
+ #define BOARD_IPI_SGI             1
+ 
++/* Device-tree node the framebuffer console binds (pexpert/arm/pe_serial.c). */
++#define BOARD_FBCON_NODE          "lancelot-fbcon"
++
+ /* 2x Cortex-A75 + 6x Cortex-A55. cpus=1 by default, see machine_routines.c. */
+ #define LANCELOT_SMP_MAX_CPUS     8
+ #define BOARD_SMP_MAX_CPUS        LANCELOT_SMP_MAX_CPUS
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+index 963e843..83128e4 100644
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -51,6 +51,9 @@
+ #define SWEET_VTIMER_INTID        19
+ #define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
+ 
++/* Device-tree node the framebuffer console binds (pexpert/arm/pe_serial.c). */
++#define BOARD_FBCON_NODE          "sweet-fbcon"
++
+ #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
+ 
+ #define GICR_PE_SIZE              0x20000 // Size of each redistributor region
