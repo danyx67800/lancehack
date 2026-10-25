@@ -578,8 +578,8 @@ step to the console itself.
 `129f4f84c2606fbd9b846f792cb11a9675f95f7064420d4bc1bd213866d41ef1`, entry
 `0xfffffe000747f488`. Image `shim/out/shim-boot-lancelot.img`, 16 660 480 bytes,
 SHA-256 `4937639b7474b14bf163cb12b21e6f43b9b22efb10238a6a2ae5b2afbd5cd3b5`, ramdisk
-identical to the payload (10 segments, ADT `0xa016`). Flashed
-(`Sending 16270 KB / Writing OKAY`).
+identical to the payload (10 segments, ADT `0xa016`). Flashed to `recovery`
+(`Sending 16270 KB / Writing OKAY`), waiting for the observation.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
