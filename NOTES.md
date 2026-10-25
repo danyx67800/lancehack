@@ -485,6 +485,45 @@ again, so the shim needs **Vol+ + Power** from a powered-off phone.
    `SWEETXNU` payload of a shim boot image and test (flash `recovery` again, with the
    user's confirmation; restore image `backup/lancelot-lineage/recovery.img`).
 
+**TEST #12, second attempt (image `2f98a2a9`): the page stops at `SEGS`.** The photo
+was read back with OCR and a row profile rather than by eye (the image is a HEIC of the
+panel): 21 yellow text rows from `S1 FB` to `SEGS n=0A end=42088000`, in order, with
+`INITRD 47CB0000-48C23DD0`, `PHYS 40000000/3DBB0000`, `VIRT FFFFFE0006000000`,
+`ENTRY FFFFFE000747F488`, `DST 41004000-42092728` all correct, i.e. the guard fix
+worked and **all ten segments were copied**. Nothing after `SEGS` is visible, and the
+seven colour bands the probe paints at the bottom of the buffer (rows 2276-2340) are
+absent, so the panel is not showing the buffer that far down (recorded as OPEN in
+`docs/lancelot-hardware.md` §6). `BOOTARG`/`JUMP` would have been drawn at rows
+1724-1820 - right at that edge - so the photo cannot tell "loader hung in the ADT copy"
+from "kernel took control and died before it owned the screen".
+
+**The real bug that photo hid (patch `0086`, commit `4c16d13`).** Every mark xnu makes
+before `pe_serial`'s fbcon is up was hardwired to sweet's frame buffer: `start.s` drew
+the stage-0 band at `0x9c000000`, mapped that block Normal-NC, `arm_vm_init.c` mapped it
+again below `gVirtBase`, and `sweet_early.c` used it as the console base. On lancelot
+`0x9c000000` is not the panel, so `SWEET EARLY 01..20` went nowhere even if the kernel
+was running fine. The values now come from the board header (`BOARD_FB_*`,
+`BOARD_EARLY_FB_BLOCK`): base `0x7e605000`, 32 MB block `0x7e400000`, 1080x2340,
+stride 4320, x offset 256, top 520, stage-0 band on the first visible row (buffer
+`0x7e605000 + 520*4320 + 256*4`). Sweet's numbers are unchanged.
+
+**Shim side (commit `7c17a35`).** The probe page is shorter (base/stride/VRAM dropped,
+`S1 FB writable`), the loader prints `ENTRYW w0= w1=` - the first two words it left at
+the entry point, `140006F5 D503201F` for this kernel - and it paints the 48 rows under
+LK's splash magenta immediately before the jump. A magenta strip therefore means the
+jump ran; xnu's stage-0 band lands white inside its left end, and any
+`SWEET EARLY NN:` line below it says how far the kernel got.
+
+**TEST #13 prepared (2026-10-25).** CI run `40190682071` (commit `7c17a35`,
+`-f machine_config=LANCELOT`) is green: `kernel.development.lancelot`,
+**17 011 376 bytes**, SHA-256
+`f1fb8e0bebacb4f814933609cfb0aabe2bdd918c33822b509d619c4d67e2c6fa`, entry
+`0xfffffe000747f488` and `140006F5` at it. ADT `0xa016` bytes, payload 16 399 824
+bytes, image `shim/out/shim-boot-lancelot.img` **16 660 480 bytes**, SHA-256
+`7c5b2a6a5fe48333f08150850033610aabf0037b3281769c60756fdc5eea8540`. Flash target
+`recovery` only, restore `backup/lancelot-lineage/recovery.img`, boot from a powered-off
+phone with **Vol+ + Power**.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
