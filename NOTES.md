@@ -6,6 +6,52 @@ porting pattern of [Bergamota / ios-beryllium](https://github.com/ry-diffusion/b
 (Poco F1, SDM845). The text below the next section is upstream sweet's log and is kept
 as-is: it documents the machinery this fork inherits.
 
+## Handoff update (2026-10-26, M3: the boot stop reproduces in QEMU)
+
+**STATE: TEST #25 changed nothing on the panel.** The kernel still stops right after
+`kmem_range_init`'s claim list, no panic text. The six breadcrumb tiles of TEST #25
+were painted in the console's own rows (`y = 680`), which the text console clears on
+every scroll, so their absence proves nothing about the kernel. That instrument is
+wrong, not the kernel.
+
+**The stop is now reproducible off the phone.** `tools/qemu-lancelot.py` boots the
+payload taken from `shim-boot-t25.img` on QEMU's `virt`, without any flash. It slides
+the image up by 2 MiB (QEMU always parks its own DTB in the first MiB of RAM, which is
+lancelot's `phys_base`) and patches the addresses that depend on it; virtual addresses
+are untouched, so every PC and fault address it prints is the phone's. Recipe:
+
+    tools/unpack_bootv2.py shim/out/shim-boot-t25.img /tmp/b && cp /tmp/b/ramdisk p.bin
+    tools/qemu-lancelot.py p.bin /tmp/q --secs 15 --fb 0x7e605000   # -> summary.txt, fb.png
+
+**What it shows.** The boot dies in a data abort, and the logged `ELR`s are impossible
+fault sites: `_VNOP_COMPOUND_RENAME+0x14` (`stp x20, x19, [sp, #0xb0]`), `_pv_free_array_give_batch.cold.1+0x14`
+(an `add`), `_sparse_cluster_push+0x2c` (a `mov`) - three unrelated functions, each with a
+bogus `SP`/`FAR` (0x0, 0x220, 0x558). Unrelated PCs plus a garbage stack is the
+signature of a corrupted *saved state* being `eret`ed to and re-faulting, not of three
+crashes. The same run reproduces the numbers the phone showed on TEST #24
+(`ESR 0x96000006`, `FAR 0x220`).
+
+**Structural cause, found in the source.** `start.s` still carries a bring-up hack:
+
+    #if defined(LANCELOT)
+    ... msr VBAR_EL1, <LowExceptionVectorBase>   /* "send exceptions back to the
+        bootstrap vectors, whose sync entries paint red and stop" */
+    #endif
+
+It is never undone, so *every* exception after that point runs the bootstrap vectors.
+Those handlers cannot print this early (`sweet_early` is already disabled after
+`arm_vm_init`) and their return path hands back the saved state, which is why a single
+early fault turns into an endless loop of unrelated fault sites instead of a panic.
+The binary caves of TEST #22-#25 were patched into `ExceptionVectorsBase`, which is no
+longer the vector in use - that is why they printed nothing.
+
+**Patch drafted:** `0090-lancelot-drop-bootstrap-vectors` deletes the redirect, so the
+vectors installed a few lines above stay live and a real panic can print. Applies
+cleanly on the post-0089 tree (`git apply --check`). Not built yet.
+
+**Not the cause** (each ruled out with a QEMU run): `cpus=1` vs no `cpus=` vs `cpus=8`,
+`memSize` 0x10000000 / 0x3dbb0000 / 0x4d000000, and the TEST #22-#25 vector caves.
+
 ## lancehack handoff (2026-10-24, M1 done - phone read, still nothing written)
 
 **STATE: the phone has been read, no partition has been written.** Boot path decided

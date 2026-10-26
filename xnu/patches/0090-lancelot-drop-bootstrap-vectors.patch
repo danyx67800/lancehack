@@ -1,0 +1,24 @@
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -945,20 +945,6 @@
+ 	// If x21 != 0, we're doing a warm reset, so we need to trampoline to the kernel pmap.
+ 	cbnz	x21, Ltrampoline
+ 
+-#if defined(LANCELOT)
+-	/*
+-	 * Any fault after this point must be visible: send exceptions back to the
+-	 * bootstrap vectors, whose sync entries paint red (slot 6) and stop. The
+-	 * real vectors installed above need a current thread and would just spin.
+-	 */
+-	adrp	x0, EXT(LowExceptionVectorBase)@page
+-	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
+-	add		x0, x0, x22
+-	sub		x0, x0, x23
+-	msr		VBAR_EL1, x0
+-	isb
+-#endif
+-
+ 	// Set KVA of boot args as first arg
+ 	add		x0, x20, x22
+ 	sub		x0, x0, x23
