@@ -14,11 +14,14 @@ were painted in the console's own rows (`y = 680`), which the text console clear
 every scroll, so their absence proves nothing about the kernel. That instrument is
 wrong, not the kernel.
 
-**The stop is now reproducible off the phone.** `tools/qemu-lancelot.py` boots the
-payload taken from `shim-boot-t25.img` on QEMU's `virt`, without any flash. It slides
+**A QEMU harness exists, but it is not yet a stand-in for the phone.**
+`tools/qemu-lancelot.py` boots a payload on QEMU's `virt`, without any flash. It slides
 the image up by 2 MiB (QEMU always parks its own DTB in the first MiB of RAM, which is
-lancelot's `phys_base`) and patches the addresses that depend on it; virtual addresses
-are untouched, so every PC and fault address it prints is the phone's. Recipe:
+lancelot's `phys_base`), patches the addresses that depend on it and rewrites
+`boot_args->Video` to lancelot's panel. It reproduced the phone's TEST #24 numbers once
+(`ESR 0x96000006`, `FAR 0x220`), but the kernel never draws its console there and stops
+*earlier* than on the phone (with 0090: `arm_init+4`), so today it can only compare two
+kernels against each other - it cannot tell what the phone will do. Recipe:
 
     tools/unpack_bootv2.py shim/out/shim-boot-t25.img /tmp/b && cp /tmp/b/ramdisk p.bin
     tools/qemu-lancelot.py p.bin /tmp/q --secs 15 --fb 0x7e605000   # -> summary.txt, fb.png
@@ -45,9 +48,13 @@ early fault turns into an endless loop of unrelated fault sites instead of a pan
 The binary caves of TEST #22-#25 were patched into `ExceptionVectorsBase`, which is no
 longer the vector in use - that is why they printed nothing.
 
-**Patch drafted:** `0090-lancelot-drop-bootstrap-vectors` deletes the redirect, so the
-vectors installed a few lines above stay live and a real panic can print. Applies
-cleanly on the post-0089 tree (`git apply --check`). Not built yet.
+**Patch built:** `0090-lancelot-drop-bootstrap-vectors` deletes the redirect, so the
+vectors installed a few lines above stay live. CI run `40359677756` (the first attempt
+died with "job was not acquired by Runner of type hosted", i.e. macOS capacity, not a
+compile error) produced `kernel.development.sweet` `f1d4021a...` in which exceptions do
+enter `ExceptionVectorsBase` (`0x7488000`) instead of `LowExceptionVectorBase`. The
+image for the phone is `shim/out/shim-boot-t26.img` `1d767fbd...`, payload
+`c3446777...`, entry `0xfffffe000748c488`.
 
 **Not the cause** (each ruled out with a QEMU run): `cpus=1` vs no `cpus=` vs `cpus=8`,
 `memSize` 0x10000000 / 0x3dbb0000 / 0x4d000000, and the TEST #22-#25 vector caves.

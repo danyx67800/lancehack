@@ -40,6 +40,11 @@ import time
 QEMU = 'qemu-system-aarch64'
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# lancelot's bootloader framebuffer (shim/board.h): the panel the kernel draws on.
+FB_BASE, FB_W, FB_H = 0x7e605000, 1080, 2340
+FB_STRIDE = FB_W * 4
+FB_BYTES = FB_STRIDE * FB_H
+
 
 def load_harness():
     spec = importlib.util.spec_from_file_location(
@@ -60,6 +65,11 @@ def shifted_image(payload, shift):
     for off in (16, 32, 96):        # physBase, topOfKernelData, deviceTreeP
         struct.pack_into('<Q', img, rel_ba + off,
                          struct.unpack_from('<Q', img, rel_ba + off)[0] + shift)
+    # qemu-sweet.py boots sweet, so its boot_args carry sweet's panel. The kernel
+    # draws its console where boot_args->Video points, so without this the screen
+    # stays black and the boot looks worse than it is.
+    for off, val in ((40, FB_BASE), (56, FB_STRIDE), (64, FB_W), (72, FB_H)):
+        struct.pack_into('<Q', img, rel_ba + off, val)
     rel_adt = (kernel_end + phys_base - virt_base) - phys_base
     for off in (0x244, 0x2718):     # /chosen dram-base, absolute end of DRAM
         struct.pack_into('<Q', img, rel_adt + off,
@@ -67,32 +77,31 @@ def shifted_image(payload, shift):
     return bytes(img), qs.stub(ba_pa + shift, entry_pa + shift), phys_base + shift
 
 
-def monitor(sock_path, *commands, wait=1.0):
+def qmp(sock_path, *commands):
+    """Run QMP commands; HMP's pmemsave silently writes nothing on a stopped guest."""
+    import json
     import socket
-    out = ''
     s = socket.socket(socket.AF_UNIX)
     s.connect(sock_path)
-    s.settimeout(0.4)
+    s.settimeout(10)
+    f = s.makefile('rwb')
+    f.readline()
 
-    def drain():
-        buf = b''
-        try:
-            while True:
-                d = s.recv(65536)
-                if not d:
-                    break
-                buf += d
-        except Exception:
-            pass
-        return buf.decode('utf-8', 'replace')
+    def one(execute, **args):
+        f.write((json.dumps({'execute': execute, 'arguments': args}) + '\n').encode())
+        f.flush()
+        while True:
+            line = f.readline()
+            if not line:
+                return None
+            msg = json.loads(line)
+            if 'return' in msg or 'error' in msg:
+                return msg
 
-    time.sleep(0.2)
-    drain()
+    one('qmp_capabilities')
     for c in commands:
-        s.sendall(c.encode() + b'\n')
-        time.sleep(wait)
-        out += drain()
-    return out
+        one(c[0], **c[1])
+    return None
 
 
 def summarize(log, outdir):
@@ -121,8 +130,9 @@ def main():
     ap.add_argument('--secs', type=float, default=25.0)
     ap.add_argument('--shift', default='0x200000',
                     help='clear QEMU\'s own DTB, which occupies the first MiB of RAM')
-    ap.add_argument('--fb', default=None, help='panel base PA, e.g. 0x7e605000')
-    ap.add_argument('--fb-size', default='0x9a3b80', help='1080*2340*4 by default')
+    ap.add_argument('--fb', default=hex(FB_BASE),
+                    help="panel base PA (default: lancelot's boot framebuffer)")
+    ap.add_argument('--fb-size', default=hex(FB_BYTES))
     a = ap.parse_args()
 
     out = os.path.abspath(a.outdir)
@@ -144,7 +154,7 @@ def main():
             os.unlink(p)
     cmd = [QEMU, '-M', 'virt,gic-version=3', '-cpu', 'cortex-a76', '-smp', '1',
            '-m', '4G', '-nographic', '-serial', f'file:{out}/serial.txt',
-           '-monitor', f'unix:{sock},server,nowait',
+           '-qmp', f'unix:{sock},server,nowait',
            '-d', 'int,guest_errors', '-D', log, '-no-reboot',
            '-device', f'loader,file={out}/ram.bin,addr={load_at:#x},force-raw=on',
            '-device', f'loader,file={out}/stub.bin,addr={stub_at:#x},force-raw=on',
@@ -156,12 +166,20 @@ def main():
     if p.poll() is not None:
         print(p.stderr.read().decode('utf-8', 'replace'), file=sys.stderr)
         return 4
-    cmds = ['stop']
+    cmds = [('stop', {})]
     if a.fb:
-        cmds.append('pmemsave %s %s %s' % (a.fb, a.fb_size, os.path.join(out, 'fb.raw')))
-        cmds.append('quit')
-    monitor(sock, *cmds, wait=2.0 if a.fb else 0.2)
-    time.sleep(0.5)
+        cmds.append(('pmemsave', {'val': int(a.fb, 0), 'size': int(a.fb_size, 0),
+                                 'filename': os.path.join(out, 'fb.raw')}))
+        cmds.append(('quit', {}))
+    qmp(sock, *cmds)
+    if a.fb and not p.poll():
+        want = int(a.fb_size, 0)
+        for _ in range(50):
+            if os.path.exists(os.path.join(out, 'fb.raw')) and \
+                    os.path.getsize(os.path.join(out, 'fb.raw')) >= want:
+                break
+            time.sleep(0.2)
+    time.sleep(0.3)
     p.kill()
 
     text = summarize(log, out)
@@ -169,8 +187,7 @@ def main():
     raw = os.path.join(out, 'fb.raw')
     if a.fb and os.path.exists(raw):
         qs = load_harness()
-        qs.FB_BASE, qs.FB_W, qs.FB_H = int(a.fb, 0), 1080, 2340
-        qs.FB_STRIDE = 1080 * 4
+        qs.FB_BASE, qs.FB_W, qs.FB_H, qs.FB_STRIDE = int(a.fb, 0), FB_W, FB_H, FB_STRIDE
         qs.write_png(os.path.join(out, 'fb.png'), open(raw, 'rb').read())
         print('[+] wrote %s/fb.png' % out)
     return 3 if text != 'no exceptions' else 0
