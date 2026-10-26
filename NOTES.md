@@ -646,10 +646,46 @@ the magenta strip is the loader's, painted before the jump. Every number in that
 was consistent, which is exactly why nothing looked wrong.
 
 **Guard from now on:** the artifact must be named **`kernel.development.lancelot`**. A
-`sweet` name there is a build-configuration error and the image must not be packed, let
-alone flashed. `gh workflow run xnu.yml -f machine_config=LANCELOT` is the only way to
+`sweet` name there is a build-configuration error and the image must not be packed,let alone flashed. `gh workflow run xnu.yml -f machine_config=LANCELOT` is the only way to
 produce it. Re-run for this test: **`40330263611`** (commit `2e7b35b`, patches identical
 to `70d8fbc`).
+
+**No local kernel build on this host.** The Mac has Xcode 21 and no KDK. xnu-8796 has to
+be built with **Xcode 15's `iig`** (16 and later emit `IORPC.kernelContent`, which this
+xnu does not have) and linked against a KDK's `libcc_kext`/`libfirehose_kernel`. The
+`macos-15` image lost Xcode 15.4 in May 2025 (actions/runner-images#12195) and
+`macos-13` is x86_64, so **macos-14 stays the only builder**; a queued run can only be
+waited for. Both dispatches so far queued for 10-35 min (`40330263611` was cancelled in
+the queue, `40332551791` is still waiting), which is what pushed the next test into the
+binary below.
+
+**TEST #17: the x0 clobber, patched into the kernel already on disk.** The lancelot
+kernel of TEST #15 (CI `40193380496`, SHA-256
+`129f4f84c2606fbd9b846f792cb11a9675f95f7064420d4bc1bd213866d41ef1`) still has the
+0088 bands, so it already paints cyan as `arm_init`'s first statement. The yellow band's
+seven instructions were rewritten from `x0` to `x17` in place:
+
+| address | was | now |
+| --- | --- | --- |
+| `0x7481480`-`0x748148c` | `movk x0,#0,lsl48` … `movk x0,#0x9b00` | same, `x17` |
+| `0x7481490` | `add x0,x0,#0xc0` | `add x17,x17,#0xc0` |
+| `0x74814bc` | `mov x5,x0` | `mov x5,x17` |
+| `0x74814cc` | `add x0,x0,x4` | `add x17,x17,x4` |
+
+Same instruction length, so the file size, every section address, the entry point
+(`0xfffffe000747f488`) and the payload size are unchanged; 9 bytes differ in the whole
+17 MB kernel. `arm_init` now receives the boot-args KVA that `start_first_cpu` computes
+at `0x7481478`/`0x748147c`, and the `ret` right after the band is untouched. Patched
+kernel SHA-256 `26561f868e00a73e68701c4b21592a17c32ebcbacfb1ae6c3d132f7e1e1072da`;
+image `shim/out/shim-boot-lancelot-x0.img`, **16 660 480 bytes**, SHA-256
+`3a43c92a0ca234d9912bfb832b9d832dbcf9636727c82579539624d929382dcd`, ramdisk identical
+to the payload (`unpack_bootv2` + `cmp`). Patch 0089 stays the proper fix (it also adds
+the fault vector and the cyan/orange bands) and is still queued as CI `40332551791`.
+
+**What TEST #17 answers:** cyan (slot 4) and the `SWEET EARLY 01:` text mean the clobber
+was the killer and the console works; only the four tiles again mean the `ret` into
+`arm_init` never lands, and the next step is to walk the KVA mapping of `arm_init`
+(`0xfffffe0007ab03dc`, 28 MB into a 32 MB bootstrap block) rather than the arguments.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
