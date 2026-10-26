@@ -988,6 +988,49 @@ to the payload. Flashed to `recovery` on 2026-10-26 16:26. Red alone = the hang 
 claim print; red + magenta = `pmap_init`; red + magenta + white = `kmem_metadata_init`;
 all four = a later startup function.
 
+**TEST #24 result: the boot is past the claim print, and it stops inside
+`kmem_metadata_init()`.** The photo (16:29) shows **two** tiles side by side on the stage row -
+**magenta (slot 7, `pmap_init`) and white (slot 8, `kmem_metadata_init`)** - and no cyan
+(slot 9, `kmem_sizeclass_init`). The red canary (slot 10) is gone, and the text still ends in
+the middle of a claim line (a different one, `gIOKitPageableFixed1`, because the shuffle seed
+changes every boot).
+
+That combination is self-consistent once the console is read properly: `pe_serial.c`'s
+`fbcon_newline()` is a **circular** console (`fbcon_row = (fbcon_row + 1) % fbcon_rows`, then
+`fbcon_clear_row` of the row it wraps into), so a tile survives only until the console wraps
+onto its row again. The claim print is ~10 lines of text, i.e. exactly the wrap that erased the
+red tile painted at `kmem_range_init`; magenta and white were painted after it and nothing has
+cleared that row since. It also explains the "truncated last line": with a wrapping console the
+newest line is wherever the cursor is, not at the bottom edge.
+
+So the kernel really does return from `kmem_range_init`'s shuffle, print loop, `pmap_init()`
+and enter `kmem_metadata_init()`, and then never reaches `kmem_sizeclass_init()`. Output stops
+at the same time, which fits a block rather than a panic: the next call inside is
+`kmem_suballoc()` and then `kmem_init_meta_front()`, whose `kernel_memory_populate(... KMA_NOFAIL)`
+waits for memory instead of failing.
+
+**TEST #25 instruments that function.** Six 80-byte stubs replace one instruction each, paint a
+200x24 tile at buffer x = 696, and then run the replaced instruction and branch back; only
+x9..x13 are touched, which are dead at each chosen site (checked in the disassembly), and no
+stack is used. One tile per 32-px console row, so the photo is a staircase whose lowest lit row
+is the furthest point reached.
+
+| row | colour | point |
+| --- | --- | --- |
+| 1 | white | `kmem_metadata_init` entry |
+| 2 | magenta | returned from `kmem_suballoc` |
+| 3 | yellow | returned from `kmem_init_meta_front` (left edge) |
+| 4 | cyan | returned from `kmem_init_meta_front` (right edge) |
+| 5 | green | `kmem_sizeclass_init` entry |
+| 6 | red | `pmap_init` entry (canary, known reachable) |
+
+Image `shim/out/shim-boot-t25.img`, 16 660 480 bytes, SHA-256
+`6539559336dd999f42d77391edbd4a326c1a4cc7a2c2b0790dfa10f0534d16e2`, kernel
+`/tmp/l23/kernel.t25` (`cde90b44...`), payload `shim/out/payload-t25.bin`, ramdisk identical to
+the payload, flashed to `recovery` on 2026-10-26 16:35. Row 1 alone = the hang is inside
+`kmem_suballoc`; rows 1-2 = inside the first `kmem_init_meta_front`; rows 1-4 = the loop does
+not finish; rows 1-5 = the hang is later than this function.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
