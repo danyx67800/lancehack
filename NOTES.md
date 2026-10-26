@@ -740,6 +740,42 @@ the payload. Green would move the next probe into `arm_init` itself (BRK after t
 prologue, then at the `bl`); nothing would mean the `ret` is not the transfer being
 executed at all.
 
+**TEST #19 result: no green, no red - and that rules out the whole model.** The BRK on
+`arm_init` never fired *and* nothing faulted, so control neither arrives there nor dies
+trying. A BRK cannot be masked, and it would have gone through the same synchronous
+entry the red painter covers, so the kernel is simply not reaching `0x74814d8` (the
+`dsb sy` after the yellow band) or the `ret` after it.
+
+**The hypothesis this finally points at: the MMU may never have been enabled.** The four
+bands write `0x7e829b00`, which is the *same physical address* the identity map uses, so
+they look identical with translation on or off - they prove the stores land, not that
+`SCTLR_EL1.M` took. If the write did not take, everything fits: the bands still appear,
+the `ret` then jumps to the kernel VA `0xfffffe0007ab03dc`, the instruction fetch aborts,
+the abort vector is `0xfffffe000747b000` - also a VA, also unreachable - and the CPU
+spins in a fault loop that paints nothing and resets nothing. Upstream's own
+"`cmp x0, SCTLR_EL1_DEFAULT` / `bne .`" self-check is compiled out for SWEET *and*
+LANCELOT, so nothing in the current kernel would notice.
+
+**TEST #20 checks it, and gets two more answers in the same boot.** The `isb` right
+after `msr SCTLR_EL1` (`0x74813a8`) is now a branch to 492 bytes of new code in the vector
+cave; that code reads `SCTLR_EL1` and, if bit 0 is clear, paints **red** at
+`+0x400` and stops - otherwise it does the `isb` and branches back to the blue band.
+Two extra checkpoints reuse the same painter:
+
+| tile | where | meaning |
+| --- | --- | --- |
+| **red** (+0x400) | `SCTLR_EL1.M == 0` | the MMU never came on: that is the bug |
+| **blue** (+0x500) | BRK in place of the yellow band's `dsb sy`, then `eret` back to the `ret` | the band completed and the `ret` executed |
+| **green** (+0x600) | BRK in place of `arm_init`'s first instruction | the `ret` really delivered control |
+
+Blue alone is the interesting middle case: the band finished, the `ret` was executed, and
+neither `arm_init` nor a fault followed - which would mean the transfer goes somewhere
+that spins without faulting. Kernel SHA-256
+`3b3aae25ab82456fdbfa9597c7c77ad838be11c308a75eb7c9dd22a7169f59bc`; image
+`shim/out/shim-boot-lancelot-probe.img`, 16 660 480 bytes, SHA-256
+`4499ab2a0323eb38d4b6a8ba71c5a8526a4f06cf014d49a86aff50d4c6e26b46`, ramdisk identical to
+the payload.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
