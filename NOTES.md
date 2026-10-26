@@ -868,6 +868,65 @@ Kernel `a5ce6312f96f358eb215ac32e23b6db4573f06d4cb454d02c3d3f0be94ac523d`; image
 `shim/out/payload-first.bin` (`5ce27509...`), ramdisk identical to the payload. Patch script
 `/tmp/l22/patch_first_fault.py` with byte assertions on both sites; flash target `recovery`.
 
+**TEST #22 result: `arm_init` runs C code, slot 6 is green - and the panic is still the
+nested one.** The 16:01 photo shows `SWEET EARLY 1: arm_init entered (MMU on)` followed by
+`SWEET EARLY PANIC: Synchronous exception taken while SP1 selected at pc 0xfffffe000747400c,
+lr 0xfffffe000747400c ... esr 0x96000006 far 0x0000000000000220 cpsr 0x204003c5`, so two
+things are now certain: `SCTLR_EL1.M` took (green tile, and the cave ran at all) and the body
+of `arm_init` up to `sweet_early_mark(2)` is where the boot dies.
+
+The dump is the *second* fault, not the first: `x16 = 0x41ab1c88` in it is the cave's own
+constant for `panic_with_thread_kernel_state`, and `pc 0x747400c` is `_current_percpu_base
++0xc` (`ldr x0, [x0, #0x220]`, disassembled), i.e. the per-CPU dereference that every panic
+path performs while `TPIDR_EL1` is still 0. So calling into `panic_with_thread_kernel_state()`
+can never report a first fault: it dies on its own way to the console and the SP1 handler
+prints that instead. `lr == pc` is not a clue either - `_current_percpu_base` is a real
+function whose `bl _current_thread` leaves x30 at the address of the `ldr`.
+
+**The first fault does not need to be found yet: `arm_init` is entered with the wrong
+argument.** With patch 0088's yellow band, `start_first_cpu` computes the boot-args KVA in x0
+at `0x7481478`/`0x748147c` and the band's own `MOV64 x0, BOARD_FB_STAGE0_ADDR` throws it away
+three instructions later, so `arm_init(boot_args *args)` is called with
+`args = 0x7e829bc0` - the panel. `const_boot_args = *args` then copies 736 bytes of pixels,
+and `PE_init_platform()` gets a boot_args whose `deviceTreeP`, `deviceTreeLength` and
+`CommandLine` are all pixel data. That is the death between mark 1 and mark 2, and it is the
+same defect patch 0089 fixes in the source.
+
+TEST #17's "the x0 fix does not help" was void: that kernel still executed at EL2, where
+nothing after the bands ran at all. It only becomes meaningful now that the shim drops to EL1.
+
+**TEST #23 fixes the pointer and makes any first fault printable.** Built on the TEST #22
+kernel (`/tmp/l22/kernel.first`) with two independent binary changes (no CI, no source build):
+
+1. the yellow band's seven instructions rewritten from `x0` to `x17`
+   (`0x7481480`/`84`/`88`/`8c`, `0x7481490`, `0x74814bc`, `0x74814cc`), which is exactly what
+   patch 0089's `SWEET_BAND` prologue does;
+2. `ExceptionVectorsBase + 0x000` (EL1/SP0 sync) and `+ 0x200` (EL1/SP1 sync) branch to a
+   387-byte cave at `0x7480800` (`LowExceptionVectorBase + 0x800`, nop in this kernel) that
+   reads `ELR_EL1`/`ESR_EL1`/`FAR_EL1`, prints
+   `FF S<0|1> elr=.. ra=.. esr=.. far=.. x0=.. fp=..` through `sweet_early_putc()` and halts.
+   `ra` is `[x29 + 8]`, the faulting function's caller, read only when x29 looks like a kernel
+   VA; nothing goes near `panic()`, the per-CPU base, allocation or a lock.
+
+| what the photo shows | reading |
+| --- | --- |
+| `SWEET EARLY 2: PE_init_platform done` | the boot-args pointer was the whole blocker |
+| `FF S0 elr=..` / `FF S1 elr=..` | a first fault still exists, with its real address |
+| the TEST #22 page again | the vectors did not take: the cave or the branch is wrong |
+
+Kernel `/tmp/l23/kernel.x0` (17 018 448 bytes, SHA-256
+`c3fd2f01cfd618a81b306a6001eaf8636c28b5df9f8319149e868e54dd653eef`), payload
+`shim/out/payload-t23.bin` (`adf722c8...`, 10 segments, ADT `lancelot.adt` 10 024 bytes,
+cmdline `debug=0xc serial=3 cpus=1 keepsyms=1`), image `shim/out/shim-boot-t23.img`
+**16 660 480 bytes**, SHA-256
+`5df8c4e957ccca7651c42a605664fa2f08c4ff9fc723487caffbb53d8e62a5c9`, ramdisk identical to the
+payload (`unpack_bootv2` + `cmp`). Flash target `recovery` only, restore
+`backup/lancelot-lineage/recovery.img`, boot from a powered-off phone with **Vol+ + Power**.
+
+CI note: `gh run view 40332551791` says `The job was not acquired by Runner of type hosted`,
+so the LANCELOT build of patch 0089 never ran - not a code failure. Until a macOS runner is
+free, kernel changes travel as assertions-checked binary patches like this one.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
