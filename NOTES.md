@@ -682,10 +682,43 @@ image `shim/out/shim-boot-lancelot-x0.img`, **16 660 480 bytes**, SHA-256
 to the payload (`unpack_bootv2` + `cmp`). Patch 0089 stays the proper fix (it also adds
 the fault vector and the cyan/orange bands) and is still queued as CI `40332551791`.
 
-**What TEST #17 answers:** cyan (slot 4) and the `SWEET EARLY 01:` text mean the clobber
-was the killer and the console works; only the four tiles again mean the `ret` into
-`arm_init` never lands, and the next step is to walk the KVA mapping of `arm_init`
-(`0xfffffe0007ab03dc`, 28 MB into a 32 MB bootstrap block) rather than the arguments.
+**TEST #17 result: the same four tiles.** White, blue, green, yellow and no cyan, no
+text, so the clobbered boot-args pointer was **not** what stopped the kernel. The photo
+of TEST #15 was re-read with OCR to be sure the earlier "no text" reading was not an
+artefact of the band design: its first line is still the shim's `S1 FB writable`, not
+`SWEET EARLY 01`, and the cyan tile would have been erased anyway by
+`sweet_early_clear_row()` (it clears rows 576..607, the same row the C band uses), so
+the text was always the real signal. Everything up to the `ret` is now verified:
+
+- `lr` is `arm_init` (`0xfffffe0007ab03dc`): `adrp` gives the PA-equivalent while the
+  MMU is off, and `+virtBase -physBase` turns it back into that KVA - the arithmetic was
+  walked instruction by instruction.
+- `arm_init` is 28.0 MB into a 32 MB bootstrap block, next to `intstack_top`
+  (`0xfffffe0007c84000`, 28.5 MB) and the stack canary the prologue loads
+  (`0xfffffe0007bfab20`), all inside the block. Its first four instructions are the
+  stack frame, then `bl sweet_early_band(4, cyan)`.
+- `early_fb` in the built kernel really is `0x000000007e605000`, so the C band would
+  write to the panel, and `early_disabled` sits in the zeroed `__DATA` bss.
+
+So the fault, if there is one, can only be seen from inside the CPU: **TEST #18** puts a
+fault painter in the kernel. The real vector table's `ExceptionVectorsBase + 0x000`
+entry - *current EL, SP0, synchronous*, which is the one the kernel uses from
+`start_first_cpu` onwards - was `b el1_sp0_synchronous_vector_long`; it now branches to
+60 bytes of new code in the nop cave at `LowExceptionVectorBase + 0x800`
+(`0xfffffe0007480800`) that fills a red 64x32 tile at `0x7e829b00 + 0x400` (row 520, 256
+px in, clear of the four progress tiles) and waits on `wfe`. No stack, no globals, no
+allocation: it works even if `sp` is what faulted.
+
+Kernel `26561f86…` + x0 fix + painter: SHA-256
+`b737eb3dbb58fc6ce5b89009eb001af7f70244babfc159692d10a7338735bfaf`; image
+`shim/out/shim-boot-lancelot-x0f.img`, 16 660 480 bytes, SHA-256
+`4e2f8d3641f1d047cec7e17724b05467f3c53536704af4044725dff2e6b1900f`, entry unchanged,
+ramdisk identical to the payload.
+
+**What TEST #18 answers:** a **red tile** means an exception really is taken between the
+MMU coming on and the C console (the `ret` or `arm_init`'s first instructions); no red
+and no cyan means the CPU is spinning without faulting, which points at the `ret`
+landing somewhere unexpected rather than at a bad access.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
