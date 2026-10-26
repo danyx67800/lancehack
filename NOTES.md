@@ -815,7 +815,10 @@ Image `shim/out/shim-boot-lancelot.img`, 16 660 480 bytes, SHA-256
 `shim/out/payload.bin` (`374f143f...`, byte-identical to a fresh `tools/mkpayload.py` run
 over the TEST #15 kernel `129f4f84...`, so the kernel side is the known four-tile build);
 ramdisk identical to the payload (`unpack_bootv2` + `cmp`). `boot` and `userdata` untouched;
-restore is `fastboot flash recovery backup/lancelot-lineage/recovery.img`.
+restore is `fastboot flash recovery backup/lancelot-lineage/recovery.img`. Flashed
+2026-10-26 15:4x to device `750607200404` (`Sending 'recovery' (16270 KB) OKAY` /
+`Writing 'recovery' OKAY`); needs **Vol+ + Power** from a powered-off phone, because LK
+boots its recomposed `recovery` (Linux Image header) exactly like a kernel.
 
 The one line that decides everything is now the shim's, not a hand-patched kernel:
 
