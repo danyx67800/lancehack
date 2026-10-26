@@ -634,6 +634,23 @@ the guard still passes with room to spare. Flash target `recovery` only, restore
 Flashed on 2026-10-26 14:17 to device `750607200404` (`Sending 'recovery' (16476 KB) OKAY` /
 `Writing 'recovery' OKAY`), waiting for the observation.
 
+**TEST #16 result: the shim page and the magenta strip, not one tile - and the image
+carried the wrong kernel.** No white band means `start_first_cpu` never ran, which the
+probe cannot explain on its own. The cause is upstream of the phone: a **push-triggered
+run of `xnu.yml` builds `MACHINE_CONFIG=SWEET`**, because only `workflow_dispatch` takes
+`machine_config`, and the default is SWEET. Run `40201670675` was started by a push, so
+its artifact was `kernel.development.sweet` - packed, linked and flashed as if it were
+lancelot's. That kernel writes its stage-0 band at sweet's `0x9c000000` and its platform
+expert matches `xiaomi,sweet`, so the panel gets nothing and the console never starts;
+the magenta strip is the loader's, painted before the jump. Every number in that image
+was consistent, which is exactly why nothing looked wrong.
+
+**Guard from now on:** the artifact must be named **`kernel.development.lancelot`**. A
+`sweet` name there is a build-configuration error and the image must not be packed, let
+alone flashed. `gh workflow run xnu.yml -f machine_config=LANCELOT` is the only way to
+produce it. Re-run for this test: **`40330263611`** (commit `2e7b35b`, patches identical
+to `70d8fbc`).
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
