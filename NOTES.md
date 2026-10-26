@@ -715,10 +715,30 @@ Kernel `26561f86…` + x0 fix + painter: SHA-256
 `4e2f8d3641f1d047cec7e17724b05467f3c53536704af4044725dff2e6b1900f`, entry unchanged,
 ramdisk identical to the payload.
 
-**What TEST #18 answers:** a **red tile** means an exception really is taken between the
-MMU coming on and the C console (the `ret` or `arm_init`'s first instructions); no red
-and no cyan means the CPU is spinning without faulting, which points at the `ret`
-landing somewhere unexpected rather than at a bad access.
+**TEST #18 result: no red tile, and the first line is still `S1 FB writable`.** So the
+kernel takes no synchronous exception at EL1/SP0 *and* writes nothing, which is a
+strange pair: a bad access would have painted red, and a working path would have reached
+the C band. Either the exception is taken through an entry that was not patched (SPx, or
+SError), or the CPU is stuck somewhere that neither writes nor faults.
+
+**TEST #19 asks the question directly with a BRK instead of an inference.** `arm_init`'s
+first instruction, `sub sp, sp, #0xd0` at `0xfffffe0007ab03dc`, is now `brk #0`; both
+synchronous entries of the real vector table (`+0x000` SP0 and `+0x200` SPx) branch to a
+new painter that reads `ELR_EL1` and paints one tile on the stage row at
+`0x7e829b00 + 0x400`:
+
+| tile | meaning |
+| --- | --- |
+| **green** | `ELR_EL1 == 0xfffffe0007ab03e0`, i.e. the BRK fired: the `ret` **does** deliver control to `arm_init` |
+| **red** | some other exception |
+| nothing | no exception and no arrival: the CPU is stuck between the yellow band and `arm_init` |
+
+Kernel SHA-256 `ea0219932f579791ca8210e680b3e7ebd6a6a7ebd7234b7974851971cd1ff08b`; image
+`shim/out/shim-boot-lancelot-brk.img`, 16 660 480 bytes, SHA-256
+`30aec3e6068d54d6f6e1224f307cc1ee36568cef9706d538dbbf61ae1394c3b5`, ramdisk identical to
+the payload. Green would move the next probe into `arm_init` itself (BRK after the
+prologue, then at the `bl`); nothing would mean the `ret` is not the transfer being
+executed at all.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
