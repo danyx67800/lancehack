@@ -927,6 +927,40 @@ CI note: `gh run view 40332551791` says `The job was not acquired by Runner of t
 so the LANCELOT build of patch 0089 never ran - not a code failure. Until a macOS runner is
 free, kernel changes travel as assertions-checked binary patches like this one.
 
+**TEST #23 result: XNU boots into `kernel_early_bootstrap` and prints on the panel.** The
+16:15 photo (`2026-10-26 16.15.54.jpg`) reads, in order:
+
+```
+zone_init: map GEN0..GEN3, DATA, metadata, metablits, extra
+VM bootstrap done: 85 maps, 165 entries and 501 holes left
+Long logs support configured: size: 16384
+Log queues configured: slot count: 8, per-slot size: 32768, total size: 262144
+Firehose configured: 16 chunks, 8 io pages
+OSLog stream configured: stream: 8192 bytes, cache: 2112 bytes
+OSLog stream verification: 0
+standard timeslicing quantum is 10000 us
+standard background quantum is 2500 us
+mig_table_max_displ = 54 mach_kobj_count = 374
+kdp_core zlib memory 0x8000
+Serial requested, consistent debug disabled or debug boot arg not present, configuring debugging over serial
+iBoot version: sweet-shim
+"name" not a kext
+"AAPL,phandle" not a kext
+gIOKitPageableFixed2 : 0xfffffe8fd0000000 - 0xff...
+```
+
+So the boot-args pointer really was the whole blocker: `arm_init` returned, `machine_startup`
+ran, the kernel VM bootstrapped with the real ADT (`iBoot version` is read from `/chosen`),
+zones and the log/OSLog system came up, and the startup kmem range table IOKit asks for is
+being printed. **M3's criterion - kernel text on the phone's own panel - is met.**
+
+The two `"..." not a kext` lines are cosmetic: they come from `OSKext` walking device-tree
+properties as if they were bundle identifiers, and the boot continues past them.
+
+Open: whether it stops after that table (next wall would be `IOPlatformExpert`/IOKit device
+tree initialisation) or keeps scrolling. The console has no scrollback, so the observation is
+a second photo of the same screen after a minute.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
