@@ -776,6 +776,55 @@ that spins without faulting. Kernel SHA-256
 `4499ab2a0323eb38d4b6a8ba71c5a8526a4f06cf014d49a86aff50d4c6e26b46`, ramdisk identical to
 the payload.
 
+**TEST #20 result: white only - one tile, no red.** The 15:27 photo was measured, not eyeballed:
+along the stage row the colour run leaves the panel's left edge at photo x=388 and runs to
+431 (44 px at this scale = exactly one 64-px slot), then magenta to the strip's right end.
+So **slot 0 alone**, and the page is the shim's, ending in `JUMP 000000004147F488` /
+`XNU jumping`. Disassembling the flashed payload (`kernel.development.lancelot.probe`)
+confirms the injection landed where it says: `0x74813a8: b 0x7480800`, and the cave is
+`mrs x6, SCTLR_EL1` / `tbz w6,#0,mmu_off` / `isb` / `br x9` with `x9 = 0xfffffe00074813ac`,
+with the red painter at `+0x20`. Therefore the branch ran, the `mrs` ran, **`M == 0` did not
+happen** (no red tile at `+0x400`), and what killed the boot is the `br` to a *kernel VA*.
+Blue, green and yellow vanished only because they sit after that point. This also voids the
+TEST #18/#19 reading: both painters were installed in the **EL1** vector table, and this
+boot never reached an EL1 vector at all.
+
+**The model that fits all of it: the kernel is executing at EL2.** `start_first_cpu` never
+checks `CurrentEL`; it is written for iBoot/ABL, and both enter at EL1. At EL2 `msr
+SCTLR_EL1` has no effect whatsoever (EL2 executes under `SCTLR_EL2` and translates through
+`TTBR0_EL2`/`TTBR1_EL2`, which nothing ever loads), while `mrs SCTLR_EL1` still reads back
+the value just written - precisely the observed pair "M reads 1, nothing translates". `msr
+VBAR_EL1` is equally inert, so every later fault is taken to `VBAR_EL2` (LK's table, or 0)
+and dies silently: that is the whole "no exception ever painted red" mystery, and why a
+BRK on `arm_init` never fired. It also explains the V=P bands: with no translation a
+physical store still lands. Linux's `head.S` opens with `el2_setup` for exactly this
+reason; MediaTek's LK hands over at EL2 and lets the kernel do the drop, and xnu has no
+such code for any non-Apple board.
+
+**Fix in the shim, not the kernel: no CI run needed.** `shim/start.S` now reads `CurrentEL`
+and, when it is EL2, sets `HCR_EL2.RW`, clears `CPTR_EL2`, sets
+`CNTHCTL_EL2.EL1PCTEN|EL1PCEN` and `CNTVOFF_EL2 = 0`, then `eret`s to `EL1h` before the
+stack and vectors are set up (that order matters: `SPSel #1` selects SP_EL2 at EL2 and
+SP_EL1 at EL1). The level it was entered at is passed to `shim_main` as a second argument
+and printed as the page's first line, `S0 EL x`: 1 = LK already hands over at EL1 and the
+drop is a no-op, 2 = EL2, i.e. the drop is what lets `SCTLR_EL1` - and the kernel's MMU -
+take effect.
+
+Image `shim/out/shim-boot-lancelot.img`, 16 660 480 bytes, SHA-256
+`3bed02b8ce11f900c12e45666faf16bbc4024c2cab385a02d3a1685779341ba1`; payload
+`shim/out/payload.bin` (`374f143f...`, byte-identical to a fresh `tools/mkpayload.py` run
+over the TEST #15 kernel `129f4f84...`, so the kernel side is the known four-tile build);
+ramdisk identical to the payload (`unpack_bootv2` + `cmp`). `boot` and `userdata` untouched;
+restore is `fastboot flash recovery backup/lancelot-lineage/recovery.img`.
+
+The one line that decides everything is now the shim's, not a hand-patched kernel:
+
+| photo | meaning |
+| --- | --- |
+| `S0 EL 2` and still nothing past the yellow tile | EL2 was not the blocker; the KVA mapping itself needs a probe |
+| `S0 EL 2` plus cyan (slot 4) or `SWEET EARLY` text | EL2 was the blocker and M3 is unblocked |
+| `S0 EL 1` | LK already hands over at EL1, so the drop changes nothing and the mapping is wrong for another reason |
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

@@ -1,6 +1,13 @@
 /*
- * sweet boot shim entry: arm64 Linux Image header so Qualcomm ABL treats
- * us like a kernel. ABL enters at EL1, MMU/D-cache off, x0 = DTB pointer.
+ * boot shim entry: arm64 Linux Image header so the bootloader treats us like
+ * a kernel. MMU/D-cache off, x0 = DTB pointer.
+ *
+ * The exception level is NOT the same on every board: ABL (sweet) enters at
+ * EL1, MediaTek's LK (lancelot) enters at EL2. Linux's head.S drops from EL2
+ * itself; xnu's start.s never does, and at EL2 every SCTLR_EL1 write is a
+ * no-op, so the MMU never comes on and the first kernel-VA fetch dies with no
+ * reachable vector. Drop to EL1 here, and pass the level we were entered at to
+ * shim_main so the probe page says which one it was.
  */
 	.section .text.head, "ax"
 	.globl _head
@@ -20,7 +27,25 @@ _head:
 	.globl _start
 _start:
 	msr	daifset, #0xf
-	mov	x19, x0			/* DTB pointer from ABL */
+	mov	x19, x0			/* DTB pointer from the bootloader */
+	mrs	x9, CurrentEL
+	lsr	x20, x9, #2		/* 1 = EL1, 2 = EL2, 3 = EL3 */
+	cmp	x20, #2
+	b.ne	1f
+	/* EL2 -> EL1: AArch64 at EL1, no traps upward, no timer offset, and the
+	 * physical counter/timer left usable from EL1 (xnu reads CNTPCT_EL0). */
+	mov	x9, #0x80000000		/* HCR_EL2.RW = 1, every trap clear */
+	msr	hcr_el2, x9
+	msr	cptr_el2, xzr
+	mov	x9, #3			/* CNTHCTL_EL2.EL1PCTEN | EL1PCEN */
+	msr	cnthctl_el2, x9
+	msr	cntvoff_el2, xzr
+	mov	x9, #0x3c5		/* EL1h, DAIF masked */
+	msr	spsr_el2, x9
+	adr	x9, 1f
+	msr	elr_el2, x9
+	eret
+1:
 	msr	spsel, #1
 	adr	x1, _stack_top
 	mov	sp, x1
@@ -35,6 +60,7 @@ _start:
 	str	xzr, [x1], #8
 	b	1b
 2:	mov	x0, x19
+	mov	x1, x20			/* the exception level we were entered at */
 	bl	shim_main
 3:	wfe
 	b	3b

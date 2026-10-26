@@ -1,8 +1,12 @@
 /*
  * lancelot (MT6769V/CU, Redmi 9) - milestone-2 instrument.
  *
- * LK enters us at EL1 with the MMU off and x0 = the FDT it built (base DTB +
- * dtbo overlays + its own /chosen atags). There is no UART and no USB, so the
+ * LK enters us with the MMU off and x0 = the FDT it built (base DTB +
+ * dtbo overlays + its own /chosen atags). On this SoC that handoff happens at
+ * **EL2**, not EL1 (see start.S, which drops to EL1 and reports the level), so
+ * the first line of the page states which level we were given: a page that
+ * reads S0 EL 2 with the kernel now getting further is the fix that unblocked
+ * M3. There is no UART and no USB, so the
  * screen is the only output channel: this build has to answer everything it
  * can in a single boot, and it must be readable without a working timer.
  *
@@ -160,7 +164,7 @@ static void sample_timer(void)
 	t1 = rsr("cntpct_el0");
 }
 
-void shim_main(uint64_t dtb)
+void shim_main(uint64_t dtb, uint64_t el)
 {
 	struct lance_probe p;
 	uint64_t fbb;
@@ -177,6 +181,10 @@ void shim_main(uint64_t dtb)
 	 * happened even when the kernel dies before it owns the screen. */
 	con_set_top(TOP_VISIBLE + 56);
 	band(0, RED);
+	/* The exception level the bootloader handed us over at, before start.S
+	 * dropped to EL1: 1 = EL1 (nothing to do), 2 = EL2 (the drop above is what
+	 * makes SCTLR_EL1 - and therefore the kernel's MMU - take effect). */
+	con_hex("S0 EL", el);
 	con_str("S1 FB", "writable");
 	con_skip();
 
