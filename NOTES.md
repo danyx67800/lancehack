@@ -581,6 +581,59 @@ SHA-256 `4937639b7474b14bf163cb12b21e6f43b9b22efb10238a6a2ae5b2afbd5cd3b5`, ramd
 identical to the payload (10 segments, ADT `0xa016`). Flashed to `recovery`
 (`Sending 16270 KB / Writing OKAY`), waiting for the observation.
 
+**TEST #15 result: white, blue, green, yellow - and nothing after the yellow.** The photo
+(2026-10-25 14:06) also shows the whole probe page ending in `JUMP 000000004147F488` /
+`XNU jumping`, so the shim side is now boringly correct and everything left is kernel.
+Four slots painted means `SCTLR_EL1`, the framebuffer block, CPACR/TPIDR/MIDR and the
+warm-reset check all ran; the boot died at the `ret` into `arm_init` or inside it before
+any C code could draw.
+
+**Reading the build tree found two things.** The good one: `start_first_cpu` computes
+`x0 = boot args KVA` (`add x0, x20, x22` / `sub x0, x0, x23`) and *then* the yellow band
+runs, whose `MOV64 x0, BOARD_FB_STAGE0_ADDR` throws that pointer away - so `arm_init`
+was called with the framebuffer address as `boot_args *`. The uncomfortable one: `arm_init`
+starts with 13 instructions of prologue (`sub sp`, six `stp`, the stack cookie load) and
+the orange band, all of which are safe with a valid `sp`, so that clobber cannot by
+itself explain a completely quiet screen. The death is at the C entry itself, and a
+fault there used to disappear into `ExceptionVectorsBase`, whose handlers need a current
+thread.
+
+**Patch `0089` (commit `70d8fbc`) makes the window visible and fixes the clobber:**
+
+- `SWEET_BAND` saves `x0` in `x17` and restores it, so `arm_init` gets the boot args
+  it is supposed to get.
+- The bootstrap vector table's two sync entries (EL1 SP0/SP1) branch to a painter that
+  fills **slot 6 red** and stops. Anything that faults before the C console exists now
+  shows as red instead of a silent spin.
+- After the warm-reset check, `VBAR_EL1` is pointed at that bootstrap table (KVA) rather
+  than at the real vectors, so a fault between the boot-args setup and `arm_init` lands
+  in the painter.
+- An asm **cyan slot 4** is painted immediately before the `ret`; `arm_init`'s own band
+  moved to **slot 5 orange**. The row now separates "died at the ret" from "entered C".
+
+| slots seen | meaning |
+| --- | --- |
+| + cyan (4), no orange | the `ret` reached `arm_init` and its first instructions faulted |
+| + orange (5), no text | C ran, the console path (static `early_fb` pointer, `iso_font`, stride) is the problem |
+| + red (6) | an exception was taken; the red slot is the fault, not the progress |
+| nothing past yellow | the `ret` itself did not arrive; `lr`/KVA of the entry is wrong |
+
+**TEST #16 prepared (2026-10-26).** CI run `40201670675` green: `kernel.development.lancelot`
+**17 206 152 bytes**, SHA-256
+`b2ab5b2772b1786c6664c9fbda8d68a8b74784f4e93652b9a64e0b03b0278c80`, entry
+`0xfffffe000748c488` (moved `+0x10000` from `0xfffffe000747f488` because the probe code
+grew; `arm_init` itself is at `0xfffffe0007ad5950`). Payload
+`shim/out/payload-0089.bin` 16 610 992 bytes, 10 segments, ADT `shim/out/lancelot.adt`
+unchanged (10 024 bytes), cmdline `debug=0xc serial=3 cpus=1 keepsyms=1`. Image
+`shim/out/shim-boot-lancelot.img` **16 871 424 bytes**, SHA-256
+`0e19ff570ad30a0c7c41b44df7a9ef467b55669fdc4b5a92301cba0f2b2f3ac4`, ramdisk identical to
+the payload (`unpack_bootv2` + `cmp`). `kernel_end` is now `0xfffffe00084c8000`, i.e. the
+loader's destination window ends around `0x424d...`; LK's ramdisk sits at `0x47c80000`, so
+the guard still passes with room to spare. Flash target `recovery` only, restore
+`backup/lancelot-lineage/recovery.img`, boot from a powered-off phone with **Vol+ + Power**.
+Flashed on 2026-10-26 14:17 to device `750607200404` (`Sending 'recovery' (16476 KB) OKAY` /
+`Writing 'recovery' OKAY`), waiting for the observation.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
