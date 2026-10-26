@@ -957,9 +957,36 @@ being printed. **M3's criterion - kernel text on the phone's own panel - is met.
 The two `"..." not a kext` lines are cosmetic: they come from `OSKext` walking device-tree
 properties as if they were bundle identifiers, and the boot continues past them.
 
-Open: whether it stops after that table (next wall would be `IOPlatformExpert`/IOKit device
-tree initialisation) or keeps scrolling. The console has no scrollback, so the observation is
-a second photo of the same screen after a minute.
+**TEST #23 hangs there.** A second look after two minutes shows the same page, no reset,
+no new lines, so the kernel stops inside `kmem_scramble_ranges()`'s DEBUG claim print (the last
+claim named is `gIOKitPageableFixed2`, and the line is cut mid-address at the bottom row of
+the console). The claims there are printed by `kmem_scramble_ranges()`, which
+`kmem_range_init()` calls before `pmap_init()`, `kmem_metadata_init()` and
+`kmem_sizeclass_init()`; the claim order is shuffled by `kmem_shuffle_claims()`, so the
+position of `gIOKitPageableFixed2` in the list says nothing by itself, and the console has no
+scrollback to count what came after it.
+
+**TEST #24 paints breadcrumbs instead of guessing.** Four 288-byte stubs in the nop cave at
+`0x7480a00` replace the first instruction of four functions, paint a 64x32 tile on the stage
+row and then run the replaced instruction and branch back, so the functions are unchanged.
+The tiles are written at the VA the kernel keeps for the framebuffer after the bootstrap
+TTBR0 is dropped, `SWEET_EARLY_FB_VA + (BOARD_FB_STAGE0_ADDR - BOARD_EARLY_FB_BLOCK)` =
+`0xfffffe0002829800`, which is why they survive a console that has since taken over the
+screen. They use only x9..x12 (no arguments in AAPCS64) and no stack.
+
+| slot | colour | painted at the entry of |
+| --- | --- | --- |
+| 10 | red | `kmem_range_init` (the function that contains the print loop) |
+| 7 | magenta | `pmap_init` |
+| 8 | white | `kmem_metadata_init` |
+| 9 | cyan | `kmem_sizeclass_init` |
+
+Image `shim/out/shim-boot-t24.img`, 16 660 480 bytes, SHA-256
+`a91b716e3f47d372c287bb9cf35edee2294ede320e3e89b9fe46e96f9563cd60`, kernel
+`/tmp/l23/kernel.bc` (`72126018...`), payload `shim/out/payload-t24.bin`, ramdisk identical
+to the payload. Flashed to `recovery` on 2026-10-26 16:26. Red alone = the hang is inside the
+claim print; red + magenta = `pmap_init`; red + magenta + white = `kmem_metadata_init`;
+all four = a later startup function.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
