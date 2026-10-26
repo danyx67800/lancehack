@@ -828,6 +828,46 @@ The one line that decides everything is now the shim's, not a hand-patched kerne
 | `S0 EL 2` plus cyan (slot 4) or `SWEET EARLY` text | EL2 was the blocker and M3 is unblocked |
 | `S0 EL 1` | LK already hands over at EL1, so the drop changes nothing and the mapping is wrong for another reason |
 
+**TEST #21 result: the kernel runs C code. EL2 was the blocker.** The screen now shows the
+sweet_early console with a real exception report instead of a frozen stage row:
+
+```
+SWEET EARLY PANIC: Synchronous exception taken while SP1 selected at pc 0xfffffe000747400c,
+lr 0xfffffe000747400c (saved state: 0xfffffe0007c2d960)
+  x0: 0  ... esr: 0x96000006  far: 0x0000000000000220  cpsr: 0x604003c5
+```
+
+That pc is `current_percpu_base()`'s `ldr x0, [x0, #0x220]`, and the fault is a level-2
+translation fault on a read of address `0x220`: `current_thread()` is `mrs TPIDR_EL1`, which
+`start.s` zeroes, so `[0 + 0x220]` does not exist. So `SCTLR_EL1` took effect, the EL1 vector
+table is reachable and the MMU translates - none of which could happen at EL2. The stage row
+still ends at the yellow tile and there is no `SWEET EARLY 01` line, so `arm_init`'s body
+never ran: the fault is between the `ret` and its first statement, i.e. the transfer itself.
+
+**The printed panic is the *second* one, and that is why the first fault has been invisible.**
+`sleh_synchronous()` (the EL1/SP0 sync entry) opens with `thread_t thread = current_thread();`
+and then `task_vtimer_check(thread)`; with `thread == NULL` that reaches `getCpuDatap()` ->
+`current_percpu_base()` -> `[0 + 0x220]`, which faults **at SP1**, and `sleh_synchronous_sp1`
+panics for *that*. `panic_trap_to_debugger()` calls `sweet_early_panic()` first, so what the
+screen shows is the second fault, and the first one's pc/esr/far never get printed. This is
+also why no earlier probe could see an exception: every fault this early is reported as this
+same per-CPU data abort.
+
+**TEST #22 therefore reports the first fault instead of the second.** `ExceptionVectorsBase +
+0x000` (EL1/SP0 sync) is a branch to a cave at `LowExceptionVectorBase + 0x800` which
+(1) paints **slot 6** on the stage row - green when `SCTLR_EL1.M` is set, red when it is not -
+and (2) calls `panic_with_thread_kernel_state()` directly with the SP0 saved state, so
+`sleh_synchronous` never runs its per-CPU dereference. One photo then gives the fault's pc,
+lr, esr, far and every register, plus the MMU bit, and the FSC field decides between "no
+mapping" (translation fault) and "mapped but not executable" (permission fault) for the
+`ret` into `arm_init`.
+
+Kernel `a5ce6312f96f358eb215ac32e23b6db4573f06d4cb454d02c3d3f0be94ac523d`; image
+`shim/out/shim-boot-lancelot-first.img`, 16 660 480 bytes, SHA-256
+`6df49e312cbe2a58666f41b6aa9cba72e805fb4db002b24a4094490a89643ff7`, payload
+`shim/out/payload-first.bin` (`5ce27509...`), ramdisk identical to the payload. Patch script
+`/tmp/l22/patch_first_fault.py` with byte assertions on both sites; flash target `recovery`.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
