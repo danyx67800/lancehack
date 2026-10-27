@@ -11,6 +11,11 @@ FILTER     only compile sources whose path contains one of these strings
 Edit the sources under BUILDTREE/xnu, re-run, and turn the result into
 patches with `git diff` there. Uses the local Apple-fork clang (swiftlang).
 
+BUILDTREE/build/xnu.obj/EXPORT_HDRS holds the copies of the exported headers the
+compile lines actually include: a patch that changes one of those has to copy it
+there too (chmod u+w first), or the check reports the old file's errors. The CI
+run regenerates them from xnu/, so only this local step needs it.
+
 Env: XNU_CC_EXTRA   extra flags (e.g. "-DKPERF -DKPC" for config changes)
      XNU_CC_POST    flags appended after the original ones (like a per-object
                     _CFLAGS_ADD in the xnu Makefiles: -U/-include after -D)
