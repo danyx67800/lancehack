@@ -6,6 +6,36 @@ porting pattern of [Bergamota / ios-beryllium](https://github.com/ry-diffusion/b
 (Poco F1, SDM845). The text below the next section is upstream sweet's log and is kept
 as-is: it documents the machinery this fork inherits.
 
+## Handoff update (2026-10-27, TEST #26 shipped a SWEET kernel - invalid test)
+
+**TEST #26 measured the build, not the panel.** The image flashed to `recovery`
+(`shim/out/shim-boot-t26.img`, payload `c3446777...`) came from the CI run that the
+*push* of 0090 triggered, and `.github/workflows/xnu.yml` defaulted
+`machine_config` to `SWEET` (the `inputs.machine_config || 'SWEET'` fallback is what
+a push event uses - it never sees the input defaults). Measured on the payloads
+with the new `tools/scan-mov64.py`, which folds `movz`/`movk` chains back into the
+constants they build:
+
+| payload | stage-0 framebuffer constant | board |
+| --- | --- | --- |
+| `payload-t25.bin` (printed text on the panel) | `0x7e829b00` = 0x7e605000 + 520*4320 + 256*4 | lancelot |
+| T26 payload (`c3446777...`) | `0x9c9c1800` = 0x9c000000 + 2368*4320 | **sweet** |
+
+So the T26 kernel drew its console and its probe row at `0x9c000000`, which on
+lancelot is not the panel: the screen kept showing the shim's own page. "No kernel
+logs" and the thin colour row in the user's report are therefore not a kernel
+result at all, and **patch 0090 is not yet tested on the phone**.
+
+The same applies to the QEMU evidence that motivated 0090: the harness booted this
+SWEET kernel with lancelot's framebuffer patched in, so "three impossible fault
+sites with a garbage SP" may have been the wrong board's constants rather than the
+bootstrap-vector redirect. 0090 stays in the series for now, but it must earn its
+place in TEST #27 before it is believed.
+
+Fixed: the workflow's input default *and* the push fallback are now `LANCELOT`, so a
+push cannot silently build a sweet kernel again. TEST #27 = the same series
+(0088+0089+0090) built with `machine_config=LANCELOT`.
+
 ## Handoff update (2026-10-26, M3: the boot stop reproduces in QEMU)
 
 **STATE: TEST #25 changed nothing on the panel.** The kernel still stops right after
