@@ -20,9 +20,33 @@ Env: XNU_CC_EXTRA   extra flags (e.g. "-DKPERF -DKPC" for config changes)
 import concurrent.futures as cf, os, re, shlex, subprocess, sys
 from collections import Counter
 
-CI_DXB = '/Users/runner/work/ios-sweet/ios-sweet/dxb'
+# The runner's checkout root. Every compile line spells it out and it carries
+# the repository name, so it is read from the log rather than hardcoded.
+CI_DXB = None
+
+
+def find_ci_dxb(log):
+    with open(log, errors='replace') as fh:
+        for line in fh:
+            m = re.search(r'/Users/runner/work/[^/\s]+/[^/\s]+/dxb(?=[/\s]|$)', line)
+            if m:
+                return m.group(0)
+    raise SystemExit('no /Users/runner/work/<owner>/<repo>/dxb path in %s' % log)
 CI_SDK_PLATFORM = re.compile(r'/Applications/Xcode[^ ]*?\.sdk/+System/Library/Frameworks/Kernel\.framework/Versions/A/PrivateHeaders/platform')
-CLANG = os.path.expanduser('~/swift/usr/bin/clang')
+def _find_clang():
+    """The Apple clang to re-run the compile lines with: an explicit
+    XNU_CC_CLANG, the swift toolchain when it is installed, else whatever Xcode
+    provides - the CI runner builds with Xcode's clang too."""
+    env = os.environ.get('XNU_CC_CLANG')
+    if env:
+        return env
+    swift = os.path.expanduser('~/swift/usr/bin/clang')
+    if os.path.exists(swift):
+        return swift
+    return subprocess.check_output(['xcrun', '--find', 'clang']).decode().strip()
+
+
+CLANG = _find_clang()
 DROP = {'-c', '-g', '-MD', '-MMD'}
 DROP_WITH_ARG = {'-MF', '-MT', '-o', '-arch'}
 COMPONENTS = ('osfmk', 'bsd', 'iokit', 'libkern', 'pexpert', 'security', 'san', 'libsa')
@@ -120,7 +144,9 @@ def run(item, bt, cdirs):
 
 
 def main():
+    global CI_DXB
     log, bt = sys.argv[1], os.path.abspath(sys.argv[2])
+    CI_DXB = find_ci_dxb(log)
     per_file = '--per-file' in sys.argv
     filters = [a for a in sys.argv[3:] if a != '--per-file']
     cmds = commands(log)
