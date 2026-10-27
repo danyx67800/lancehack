@@ -36,6 +36,34 @@ Fixed: the workflow's input default *and* the push fallback are now `LANCELOT`, 
 push cannot silently build a sweet kernel again. TEST #27 = the same series
 (0088+0089+0090) built with `machine_config=LANCELOT`.
 
+**TEST #26 closed with the photo** (`2026-10-27 14.38.29.jpg`): the panel shows the
+shim's probe page complete - `S0 EL 2`, `S1 FB writable`, `S2 WD stopped`
+(`b=0000005D a=0000005C`), `S3 TMR f=00C65D40 d=000F5BD8`, `S4 FDT parsed`, `FDT
+000000004BC80000`, `FBARG lo=7E605000`, `MEM0 lo=40000000`, `S7 DONE` - followed by
+`loader_boot`'s own report: `INITRD lo=47C80000 hi=48C576B0` (the T26 payload,
+0xF876B0 bytes - it matches), `PHYS base=40000000 size=3DBB0000`, `VIRT
+FFFFFE0006000000`, `ENTRY FFFFFE000748C488`, `DST lo=41004000 hi=424D2728`,
+`SEGS 0000000A end=424C8000`, `BOOTARG pa=424CC000 top=424D0000` and
+**`JUMP 000000004148C488`**. So the storage-free chain shim -> payload -> boot_args
+-> jump is proven end to end on the phone, and the only broken part of TEST #26 was
+the kernel's board. The magenta stripe the loader paints before the jump is measured
+at 783 photo px of a 1135 px screen, i.e. CANVAS_W = FB_W - FB_XOFF = 824 px, and no
+kernel pixel is anywhere on the panel: a sweet-configured kernel writes to
+`0x9c000000`, which on lancelot is outside the 0x40000000+0x3DBB0000 DRAM window.
+
+**TEST #27 is built and ready.** CI run `40512324443` (the workflow commit) produced
+`kernel.development.lancelot` `d3ce49da...`; `tools/mkpayload.py` with
+`shim/out/lancelot.adt` (`e239b10d`, the same ADT as every earlier payload) gives
+`shim/out/payload-t27.bin` `59fb119e...`, which carries lancelot's stage-0 constant
+`0x7e829b00` (checked with `tools/scan-mov64.py`), and `shim/build.sh` gives
+`shim/out/shim-boot-t27.img` **16 660 480 bytes**, `f03ee80d...`, entry
+`0xfffffe000747f488` (`payload == shim/out/payload-t27.bin` verified byte for byte
+inside the image). Flash target `recovery` only; restore
+`backup/lancelot-lineage/recovery.img`. It is the first build in which patch 0090
+gets to say anything: with the bootstrap-vector redirect gone, an early fault is now
+silent, so `text on the panel` means 0090 is harmless and the boot stops where
+TEST #24 stopped, while no text at all means 0090 has to be reverted and re-judged.
+
 ## Handoff update (2026-10-26, M3: the boot stop reproduces in QEMU)
 
 **STATE: TEST #25 changed nothing on the panel.** The kernel still stops right after
