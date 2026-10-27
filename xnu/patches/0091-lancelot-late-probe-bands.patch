@@ -1,0 +1,143 @@
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -95,7 +95,11 @@ sweet_early_string(const char *s)
+ void
+ sweet_early_band(unsigned int slot, uint32_t colour)
+ {
+-	volatile uint32_t *base = EARLY_FB + EARLY_YTOP * EARLY_STRIDE + EARLY_XOFF + slot * 64;
++	/* The stage row, not the console's first row: the console owns every row
++	 * from EARLY_YTOP down and clears each one as it scrolls, so a band drawn
++	 * there is erased within a screenful of text. BOARD_FB_YTOP is the row
++	 * start.s paints its own bands on, and nothing else writes to it. */
++	volatile uint32_t *base = EARLY_FB + BOARD_FB_YTOP * EARLY_STRIDE + EARLY_XOFF + slot * 64;
+ 
+ 	if (early_disabled || slot > 11) {
+ 		return;
+@@ -108,6 +112,28 @@ sweet_early_band(unsigned int slot, uint32_t colour)
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
+ 
++/*
++ * A tile that outlives the bootstrap console, for probing code that runs long
++ * after it: the same 64x32 slot on the stage row as sweet_early_band, but not
++ * gated on early_disabled (arm_vm_init sets that long before any of this code
++ * runs) and not on a stage number. Slots 0..4 belong to start.s.
++ */
++void
++sweet_probe_band(unsigned int slot, uint32_t colour)
++{
++	volatile uint32_t *base = EARLY_FB + BOARD_FB_YTOP * EARLY_STRIDE + EARLY_XOFF + slot * 64;
++
++	if (early_fb == NULL || slot > 11) {
++		return;
++	}
++	for (unsigned int y = 0; y < 32; y++) {
++		for (unsigned int x = 0; x < 64; x++) {
++			base[y * EARLY_STRIDE + x] = colour;
++		}
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
+ void
+ sweet_early_mark(unsigned int stage, const char *label)
+ {
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -11,6 +11,9 @@ void sweet_early_mark(unsigned int stage, const char *label);
+ /* A bare 64x32 colour slot on the stage row, for C code that runs before the
+  * text console is trusted. Slot 0 is the band start.s draws white. */
+ void sweet_early_band(unsigned int slot, uint32_t colour);
++/* The same slot, painted whatever early_disabled says: the only way to see how
++ * far a late startup function got. */
++void sweet_probe_band(unsigned int slot, uint32_t colour);
+ void sweet_early_putc(char c);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+@@ -21,6 +24,11 @@ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ 	(void)stage;
+ 	(void)label;
+ }
++static inline void sweet_probe_band(unsigned int slot, uint32_t colour)
++{
++	(void)slot;
++	(void)colour;
++}
+ static inline void sweet_early_disable(void) {}
+ #endif
+ 
+diff --git a/osfmk/vm/vm_kern.c b/osfmk/vm/vm_kern.c
+--- a/osfmk/vm/vm_kern.c
++++ b/osfmk/vm/vm_kern.c
+@@ -68,6 +68,7 @@
+ #include <kern/assert.h>
+ #include <kern/thread.h>
+ #include <vm/vm_kern.h>
++#include <arm64/sweet_early.h>	/* sweet_probe_band: the M3 bring-up probes */
+ #include <vm/vm_map_internal.h>
+ #include <vm/vm_object.h>
+ #include <vm/vm_page.h>
+@@ -2370,8 +2371,10 @@ kmem_init_meta_front(
+ 	kmem_range_id_t         range_id,
+ 	bool                    from_right)
+ {
++	sweet_probe_band(7, 0xffffff00);	/* yellow: entered, before the populate */
+ 	kernel_memory_populate(trunc_page((vm_map_offset_t) meta), PAGE_SIZE,
+ 	    KMA_KOBJECT | KMA_ZERO | KMA_NOFAIL, VM_KERN_MEMORY_OSFMK);
++	sweet_probe_band(8, 0xff00ffff);	/* cyan: the populate returned */
+ 	meta->km_page_marker = KMEM_META_START;
+ 	if (!from_right) {
+ 		meta++;
+@@ -2384,6 +2387,21 @@ __startup_func
+ static void
+ kmem_metadata_init(void)
+ {
++	/*
++	 * M3 probe: one 64x32 colour tile per step of this chain, painted on the
++	 * stage row (sweet_probe_band). They survive the text console, so one photo
++	 * of the panel says which step never returned: the tiles are painted in the
++	 * order the boot should reach them, left to right, slots 5..11.
++	 *
++	 *   5 white   kmem_metadata_init entry
++	 *   6 orange  kmem_suballoc returned
++	 *   7 yellow  kmem_init_meta_front entry
++	 *   8 cyan    kernel_memory_populate returned
++	 *   9 blue    back after the first kmem_init_meta_front
++	 *  10 magenta the range loop finished
++	 *  11 red     kmem_sizeclass_init entry
++	 */
++	sweet_probe_band(5, 0xffffffff);
+ 	for (kmem_range_id_t i = KMEM_RANGE_ID_FIRST; i <= kmem_ptr_ranges; i++) {
+ 		vm_map_offset_t addr = kmem_meta_range[i].min_address;
+ 		struct kmem_page_meta *meta;
+@@ -2394,17 +2412,20 @@ kmem_metadata_init(void)
+ 		    VM_MAP_CREATE_NEVER_FAULTS | VM_MAP_CREATE_DISABLE_HOLELIST,
+ 		    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, KMS_PERMANENT | KMS_NOFAIL,
+ 		    VM_KERN_MEMORY_OSFMK).kmr_submap;
++		sweet_probe_band(6, 0xffff8000);
+ 
+ 		kmem_meta_range[i].min_address = addr;
+ 		kmem_meta_range[i].max_address = addr + kmem_meta_size;
+ 
+ 		meta = (struct kmem_page_meta *) kmem_meta_range[i].min_address;
+ 		kmem_init_meta_front(meta, i, 0);
++		sweet_probe_band(9, 0xff0000ff);
+ 
+ 		meta = kmem_addr_to_meta(kmem_ranges[i].max_address, i, &addr,
+ 		    &meta_idx);
+ 		kmem_init_meta_front(meta, i, 1);
+ 	}
++	sweet_probe_band(10, 0xffff00ff);
+ }
+ 
+ __startup_func
+@@ -2422,6 +2443,7 @@ __startup_func
+ static void
+ kmem_sizeclass_init(void)
+ {
++	sweet_probe_band(11, 0xffff0000);	/* red: the far end of the probe chain */
+ 	for (uint32_t i = 0; i < KMEM_NUM_SIZECLASS; i++) {
+ 		struct kmem_sizeclass *ks = &kmem_size_array[i];
+ 		kmem_range_id_t range_id = KMEM_RANGE_ID_FIRST;

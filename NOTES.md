@@ -6,6 +6,51 @@ porting pattern of [Bergamota / ios-beryllium](https://github.com/ry-diffusion/b
 (Poco F1, SDM845). The text below the next section is upstream sweet's log and is kept
 as-is: it documents the machinery this fork inherits.
 
+## Handoff update (2026-10-27 late, TEST #27: the kernel is back on the panel)
+
+**TEST #27 result: 0090 is innocuous.** With the lancelot build of the full series
+(0088+0089+0090) the panel shows the kernel's own console - `zone_init`, `VM
+bootstrap done`, the `kmem` claim lines - exactly as in TEST #23/#24 (user report; the
+photo is being measured). So dropping the bootstrap-vector redirect costs nothing at
+this stage, and the boot is back at the stop TEST #24 found: inside the
+`kmem_metadata_init` chain.
+
+**TEST #28 turns that stop into a measurement.** Patch `0091-lancelot-late-probe-bands`
+makes it readable in one photograph:
+
+- `sweet_early_band` painted its tile on the console's *first* row (EARLY_YTOP), which
+the console clears as it scrolls - that is why TEST #25's staircase, and the orange
+`arm_init` band of TEST #22, were never visible. It now paints on BOARD_FB_YTOP, the
+row start.s uses for its own bands.
+- New `sweet_probe_band(slot, colour)`: the same 64x32 tile, but not gated on
+  `early_disabled` (arm_vm_init sets that long before the kmem chain runs), so late
+  startup code can now leave a mark that outlives the console.
+
+Probes, left to right on the stage row (slots 0..4 stay start.s's, the only ones a
+sweet kernel could ever have shown):
+
+| slot | colour | point |
+| --- | --- | --- |
+| 5 | white | `kmem_metadata_init` entry |
+| 6 | orange | `kmem_suballoc` returned |
+| 7 | yellow | `kmem_init_meta_front` entry |
+| 8 | cyan | `kernel_memory_populate` returned |
+| 9 | blue | back after the first `kmem_init_meta_front` |
+| 10 | magenta | the range loop finished |
+| 11 | red | `kmem_sizeclass_init` entry |
+
+The first missing tile is the step that never returned: 5 alone means the loop's first
+`kmem_suballoc` blocks; 7 without 8 puts the block inside `kernel_memory_populate`,
+which is what TEST #24's evidence already hinted at (`KMA_NOFAIL` waits rather than
+fails, and nothing after `kmem_metadata_init` printed).
+
+Validated before spending a run: `tools/xnu-cc.py` re-ran the two files' own compile
+lines from CI run `40512324443` (the m2 buildtree artifact) against the patched tree -
+**0 of 2 files failed**. Two fixes were needed to make that work on this host: it now
+finds clang through `xcrun` when `~/swift` is absent, and it reads the runner's
+checkout path (`/Users/runner/work/lancehack/lancehack/dxb`) out of the log instead of
+assuming the parent project's name, so the tool is no longer welded to ios-sweet.
+
 ## Handoff update (2026-10-27, TEST #26 shipped a SWEET kernel - invalid test)
 
 **TEST #26 measured the build, not the panel.** The image flashed to `recovery`
