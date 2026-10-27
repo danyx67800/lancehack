@@ -8,26 +8,41 @@ as-is: it documents the machinery this fork inherits.
 
 ## Handoff update (2026-10-27 late, TEST #27: the kernel is back on the panel)
 
-**TEST #27 result: 0090 is innocuous.** With the lancelot build of the full series
-(0088+0089+0090) the panel shows the kernel's own console - `zone_init`, `VM
-bootstrap done`, the `kmem` claim lines - exactly as in TEST #23/#24 (user report; the
-photo is being measured). So dropping the bootstrap-vector redirect costs nothing at
-this stage, and the boot is back at the stop TEST #24 found: inside the
-`kmem_metadata_init` chain.
+**TEST #27 result: 0090 is innocuous, and the stop is a real panic.** With the
+lancelot build of the full series (0088+0089+0090) the panel shows the kernel's own
+console - `zone_init`, `VM bootstrap done`, the `kmem` claim lines - and then a full
+panic dump and stackshot, which is new: with the bootstrap-vector redirect in place
+(the TEST #22-#25 builds) a fault this early painted nothing and spun, which is why
+TEST #24 could only call it "a block rather than a panic". The dump
+(`IMG_3592.HEIC`):
 
-**TEST #28 turns that stop into a measurement.** Patch `0091-lancelot-late-probe-bands`
-makes it readable in one photograph:
+    panic(cpu 0 caller 0xfffffe0007ab1f04): Kernel data abort.
+    at pc 0xfffffe00075778e0, lr 0xfffffe00079dff9c
+      esr: 0x96000005   far: 0x0000000000000028
+    ** Stackshot Succeeded ** Bytes Traced 1788 (Uncompressed 4400) **
 
-- `sweet_early_band` painted its tile on the console's *first* row (EARLY_YTOP), which
-the console clears as it scrolls - that is why TEST #25's staircase, and the orange
-`arm_init` band of TEST #22, were never visible. It now paints on BOARD_FB_YTOP, the
-row start.s uses for its own bands.
-- New `sweet_probe_band(slot, colour)`: the same 64x32 tile, but not gated on
-  `early_disabled` (arm_vm_init sets that long before the kmem chain runs), so late
-  startup code can now leave a mark that outlives the console.
+The esr is a translation fault at level 1 on a *read*: something dereferenced a
+pointer that is null or nearly so, at offset 0x28. The pc and lr cannot be trusted -
+disassembling them gives an `add` in `vlan_detached` and an `adrp` in
+`IOPlatformExpertDevice::generatePlatformUUID()`, neither of which can fault, so the
+saved state is the same garbled one TEST #24 ran into. What is trustworthy is the
+fault address (0x28) and the call chain's outer end, `Call_continuation`.
 
-Probes, left to right on the stage row (slots 0..4 stay start.s's, the only ones a
-sweet kernel could ever have shown):
+**TEST #28 turns the stop into a measurement.** Patch `0091-lancelot-late-probe-bands`
+draws tiles that no console scroll can erase:
+
+- pe_serial's fbcon owns panel rows `BOARD_FB_YTOP` .. `YTOP + (HEIGHT-YTOP)/32 * 32`
+  = 520..2311, clears each of them in 32-px cells and clears each one again on every
+  wrap. So the stage row is *not* a durable place - which is why TEST #25's staircase
+  and the orange `arm_init` band of TEST #22 never showed.
+- New `sweet_probe_band(slot, colour)`: a 64x24 tile painted twice, on the stage row
+  and on `BOARD_FB_PROBE_YTOP` (lancelot: row 2312, the 28 rows below the console's
+  last one, which nothing can clear). Not gated on `early_disabled` either, since
+  arm_vm_init sets that long before this code runs.
+- `arm_init`'s old slot-5 band is removed: it ran before the console bound, whose first
+  clear erased it, and slot 5 now belongs to the legend below.
+
+Probes, left to right (slots 0..4 stay start.s's):
 
 | slot | colour | point |
 | --- | --- | --- |
@@ -40,16 +55,20 @@ sweet kernel could ever have shown):
 | 11 | red | `kmem_sizeclass_init` entry |
 
 The first missing tile is the step that never returned: 5 alone means the loop's first
-`kmem_suballoc` blocks; 7 without 8 puts the block inside `kernel_memory_populate`,
-which is what TEST #24's evidence already hinted at (`KMA_NOFAIL` waits rather than
-fails, and nothing after `kmem_metadata_init` printed).
+`kmem_suballoc`; 7 without 8 puts the fault inside `kernel_memory_populate`, which is
+what TEST #24's evidence hinted at (`KMA_NOFAIL` waits rather than fails) and what a
+read of 0x28 inside a page-populate path would look like.
 
-Validated before spending a run: `tools/xnu-cc.py` re-ran the two files' own compile
-lines from CI run `40512324443` (the m2 buildtree artifact) against the patched tree -
-**0 of 2 files failed**. Two fixes were needed to make that work on this host: it now
-finds clang through `xcrun` when `~/swift` is absent, and it reads the runner's
-checkout path (`/Users/runner/work/lancehack/lancehack/dxb`) out of the log instead of
-assuming the parent project's name, so the tool is no longer welded to ios-sweet.
+Validated before spending a run: `tools/xnu-cc.py` re-ran those files' own compile
+lines from CI run `40512324443` against the patched tree - **0 of 3 files failed**
+(`vm_kern.c`, `sweet_early.c`, `arm_init.c`). Three things had to be fixed in the
+tooling for that to mean anything, all of them recorded in the tool: it finds clang
+through `xcrun` when `~/swift` is absent; it reads the runner's checkout path
+(`/Users/runner/work/lancehack/lancehack/dxb`) out of the log instead of assuming
+`ios-sweet`; and, because the compile lines include
+`build/xnu.obj/EXPORT_HDRS/...`, a patched board header has to be copied there too or
+the check answers about the old file - the first run of the amended patch caught
+exactly that with `use of undeclared identifier 'BOARD_FB_PROBE_YTOP'`.
 
 ## Handoff update (2026-10-27, TEST #26 shipped a SWEET kernel - invalid test)
 

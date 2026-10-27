@@ -1,3 +1,24 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -347,9 +347,14 @@ arm_init(
+ 	DTEntry chosen = NULL;
+ 	unsigned int dt_entry_size = 0;
+ 
+-	sweet_early_band(5, 0xffff8000);		/* orange: C entry and stack work.
+-	 * Slot 4 is the cyan band start.s paints just before the ret, so slot 5
+-	 * appearing is what proves this C function really ran. */
++	/*
++	 * No tile for this function any more: it runs before pe_serial's fbcon
++	 * binds, whose first clear erases the stage row, so the band said nothing
++	 * in the tests that mattered - the console text below is the evidence that
++	 * C code ran. Slot 5 now belongs to the kmem probe legend
++	 * (osfmk/vm/vm_kern.c, sweet_probe_band), whose tiles are painted after the
++	 * console and survive it.
++	 */
+ 	sweet_early_mark(1, "arm_init entered (MMU on)");
+ 
+ 	arm_setup_pre_sign();
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 --- a/osfmk/arm64/sweet_early.c
 +++ b/osfmk/arm64/sweet_early.c
@@ -14,7 +35,7 @@ diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
  
  	if (early_disabled || slot > 11) {
  		return;
-@@ -108,6 +112,28 @@ sweet_early_band(unsigned int slot, uint32_t colour)
+@@ -108,6 +112,43 @@ sweet_early_band(unsigned int slot, uint32_t colour)
  	__asm__ volatile("dsb sy" ::: "memory");
  }
  
@@ -27,14 +48,29 @@ diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 +void
 +sweet_probe_band(unsigned int slot, uint32_t colour)
 +{
-+	volatile uint32_t *base = EARLY_FB + BOARD_FB_YTOP * EARLY_STRIDE + EARLY_XOFF + slot * 64;
++	/*
++	 * Two copies of the same tile. The stage row is the natural place while the
++	 * console has not wrapped since, but the console clears that row every time
++	 * it wraps around, and a panic dump certainly wraps; the strip below the
++	 * console's last row cannot be cleared by anything. A photo shows whichever
++	 * copy survived, and either one carries the same slot number.
++	 */
++	static const uint32_t rows[] = { BOARD_FB_YTOP, BOARD_FB_PROBE_YTOP };
 +
 +	if (early_fb == NULL || slot > 11) {
 +		return;
 +	}
-+	for (unsigned int y = 0; y < 32; y++) {
-+		for (unsigned int x = 0; x < 64; x++) {
-+			base[y * EARLY_STRIDE + x] = colour;
++	for (unsigned int r = 0; r < sizeof(rows) / sizeof(rows[0]); r++) {
++		volatile uint32_t *base;
++
++		if (r > 0 && rows[r] == rows[0]) {
++			continue;
++		}
++		base = EARLY_FB + rows[r] * EARLY_STRIDE + EARLY_XOFF + slot * 64;
++		for (unsigned int y = 0; y < 24; y++) {
++			for (unsigned int x = 0; x < 64; x++) {
++				base[y * EARLY_STRIDE + x] = colour;
++			}
 +		}
 +	}
 +	__asm__ volatile("dsb sy" ::: "memory");
@@ -141,3 +177,40 @@ diff --git a/osfmk/vm/vm_kern.c b/osfmk/vm/vm_kern.c
  	for (uint32_t i = 0; i < KMEM_NUM_SIZECLASS; i++) {
  		struct kmem_sizeclass *ks = &kmem_size_array[i];
  		kmem_range_id_t range_id = KMEM_RANGE_ID_FIRST;
+diff --git a/pexpert/pexpert/arm64/LANCELOT.h b/pexpert/pexpert/arm64/LANCELOT.h
+--- a/pexpert/pexpert/arm64/LANCELOT.h
++++ b/pexpert/pexpert/arm64/LANCELOT.h
+@@ -75,6 +75,17 @@
+ /* First row the bootstrap text console owns: just under the stage-0 band. */
+ #define BOARD_FB_EARLY_YTOP       (BOARD_FB_YTOP + 56)
+ 
++/*
++ * Rows pe_serial's framebuffer console owns, and the first row below them. The
++ * console clears its rows in 32-px cells and clears each one again every time
++ * it wraps around, so a probe tile drawn on any of them is erased within a
++ * screenful of output - a panic dump is several. The 28 rows left at the bottom
++ * of the panel are the one place on it that no console activity can reach, and
++ * they are what sweet_probe_band uses for its durable copy of a tile.
++ */
++#define BOARD_FB_CONSOLE_ROWS     ((BOARD_FB_HEIGHT - BOARD_FB_YTOP) / 32)
++#define BOARD_FB_PROBE_YTOP       (BOARD_FB_YTOP + BOARD_FB_CONSOLE_ROWS * 32)
++
+ /* 2x Cortex-A75 + 6x Cortex-A55. cpus=1 by default, see machine_routines.c. */
+ #define LANCELOT_SMP_MAX_CPUS     8
+ #define BOARD_SMP_MAX_CPUS        LANCELOT_SMP_MAX_CPUS
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -74,6 +74,12 @@
+ #define BOARD_FB_STAGE0_ADDR      (BOARD_FB_BASE + 2368 * BOARD_FB_STRIDE)
+ /* First row the bootstrap text console owns. */
+ #define BOARD_FB_EARLY_YTOP       BOARD_FB_YTOP
++/*
++ * Sweet's console owns the whole panel, so the durable copy of a probe tile has
++ * nowhere below it to go and shares the console's first row (see LANCELOT.h,
++ * whose panel has a free strip under the console).
++ */
++#define BOARD_FB_PROBE_YTOP       BOARD_FB_YTOP
+ 
+ #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
+ 
